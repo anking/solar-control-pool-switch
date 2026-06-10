@@ -186,6 +186,17 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
             xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
             update_mdns_hostname(false);
 
+            // On a clear credential/AP failure, signal the startup waiter so it
+            // returns fast (and brings up the AP fallback) instead of always
+            // blocking the full 30 s timeout. The reconnect task keeps retrying
+            // regardless, in case the AP is only temporarily unreachable.
+            if (disc->reason == WIFI_REASON_AUTH_FAIL ||
+                disc->reason == WIFI_REASON_NO_AP_FOUND ||
+                disc->reason == WIFI_REASON_AUTH_EXPIRE ||
+                disc->reason == WIFI_REASON_HANDSHAKE_TIMEOUT) {
+                xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+            }
+
             // Hand off to the reconnect task. Never block the event loop.
             if (s_reconnect_task_handle) {
                 xTaskNotifyGive(s_reconnect_task_handle);

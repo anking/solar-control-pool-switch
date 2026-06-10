@@ -30,8 +30,9 @@ typedef struct {
 esp_err_t pump_init(void);
 void pump_get(pump_reading_t *out);
 
-// Command the pump. Drives the output, persists the desired state to NVS so it
-// survives the daily reboot / a power blip, and resets the settle timer.
+// Command the pump. Drives the output and resets the settle timer. The
+// commanded state is deliberately NOT persisted — the pump always boots OFF, so
+// a power loss / reboot / OTA can never silently re-energise it.
 esp_err_t pump_set(bool on);
 esp_err_t pump_toggle(void);
 bool      pump_is_on(void);

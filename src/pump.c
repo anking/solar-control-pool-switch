@@ -12,6 +12,7 @@
 #include "freertos/semphr.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 static const char *TAG = "pump";
 
@@ -86,18 +87,31 @@ static void sampler_task(void *arg)
             sum_mv = 0;
             peak_mv = 0;
 
+            int64_t now_us = esp_timer_get_time();
+
+            // Everything shared with the command tasks (commanded state, the
+            // threshold, the settle timestamp) is read under the mutex, and the
+            // reading is written in the same critical section, so a command
+            // arriving mid-update can't tear these values.
+            xSemaphoreTake(s_mutex, portMAX_DELAY);
             bool    commanded   = s_commanded_on;
-            bool    feedback_on = avg_mv >= s_threshold_mv;
-            int64_t now_us      = esp_timer_get_time();
+            int     threshold   = s_threshold_mv;
+            int64_t last_change = s_last_change_us;
+
+            // Feedback with hysteresis: once ON, only fall back OFF below
+            // (threshold - hysteresis), so a sense voltage hovering at the
+            // threshold doesn't chatter the state (and spam retained MQTT).
+            bool feedback_on = s_reading.feedback_on
+                ? (avg_mv >= threshold - PUMP_FEEDBACK_HYSTERESIS_MV)
+                : (avg_mv >= threshold);
 
             // Only treat a disagreement as a fault once the relay has had time
             // to settle after the last command.
-            bool settled  = (now_us - s_last_change_us) > (PUMP_SETTLE_MS * 1000LL);
+            bool settled  = (now_us - last_change) > (PUMP_SETTLE_MS * 1000LL);
             bool mismatch = settled && (commanded != feedback_on);
 
             if (commanded) s_on_seconds++;
 
-            xSemaphoreTake(s_mutex, portMAX_DELAY);
             s_reading.valid          = true;
             s_reading.commanded_on   = commanded;
             s_reading.feedback_on    = feedback_on;
@@ -107,13 +121,13 @@ static void sampler_task(void *arg)
             s_reading.raw_mv         = mv;
             s_reading.peak_mv        = captured_peak;
             s_reading.saturated      = captured_peak >= PUMP_FEEDBACK_SATURATION_MV;
-            s_reading.threshold_mv   = s_threshold_mv;
+            s_reading.threshold_mv   = threshold;
             s_reading.output_gpio    = PUMP_OUTPUT_GPIO;
             s_reading.feedback_gpio  = PUMP_FEEDBACK_GPIO;
             s_reading.on_seconds     = s_on_seconds;
             s_reading.sample_count   = s_sample_count;
             s_reading.last_sample_us = now_us;
-            s_reading.last_change_us = s_last_change_us;
+            s_reading.last_change_us = last_change;
             xSemaphoreGive(s_mutex);
         }
     }
@@ -201,21 +215,26 @@ void pump_get(pump_reading_t *out)
     xSemaphoreGive(s_mutex);
 }
 
+// Apply a commanded state. MUST be called with s_mutex held — drives the
+// output, stamps the settle timer, and reflects the change into s_reading
+// immediately so a status read between sampler ticks isn't stale.
+static void apply_state_locked(bool on)
+{
+    s_commanded_on   = on;
+    s_last_change_us = esp_timer_get_time();
+    drive_output(on);
+    s_reading.commanded_on   = on;
+    s_reading.last_change_us = s_last_change_us;
+    s_reading.mismatch       = false;  // suppressed during the settle window
+}
+
 esp_err_t pump_set(bool on)
 {
+    if (!s_mutex) return ESP_FAIL;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
     bool changed = (on != s_commanded_on);
-    s_commanded_on = on;
-    drive_output(on);
-    s_last_change_us = esp_timer_get_time();
-
-    // Reflect immediately so a status read between sampler ticks isn't stale.
-    if (s_mutex) {
-        xSemaphoreTake(s_mutex, portMAX_DELAY);
-        s_reading.commanded_on   = on;
-        s_reading.last_change_us = s_last_change_us;
-        s_reading.mismatch       = false;  // suppressed during settle window
-        xSemaphoreGive(s_mutex);
-    }
+    apply_state_locked(on);
+    xSemaphoreGive(s_mutex);
 
     // State is intentionally NOT persisted — the pump always boots OFF.
     ESP_LOGI(TAG, "Pump %s%s", on ? "ON" : "OFF", changed ? "" : " (no change)");
@@ -224,12 +243,25 @@ esp_err_t pump_set(bool on)
 
 esp_err_t pump_toggle(void)
 {
-    return pump_set(!s_commanded_on);
+    if (!s_mutex) return ESP_FAIL;
+    // Read-modify-write under one lock so two concurrent toggles (e.g. HTTP +
+    // MQTT) can't both read the same value and cancel out.
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    bool target = !s_commanded_on;
+    apply_state_locked(target);
+    xSemaphoreGive(s_mutex);
+
+    ESP_LOGI(TAG, "Pump %s (toggle)", target ? "ON" : "OFF");
+    return ESP_OK;
 }
 
 bool pump_is_on(void)
 {
-    return s_commanded_on;
+    if (!s_mutex) return s_commanded_on;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    bool on = s_commanded_on;
+    xSemaphoreGive(s_mutex);
+    return on;
 }
 
 bool pump_has_fault(void)
@@ -244,17 +276,58 @@ bool pump_has_fault(void)
 
 int pump_get_threshold_mv(void)
 {
-    return s_threshold_mv;
+    if (!s_mutex) return s_threshold_mv;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    int v = s_threshold_mv;
+    xSemaphoreGive(s_mutex);
+    return v;
+}
+
+// One-shot worker that commits the threshold to NVS off the caller's task, so
+// the flash erase/write (tens of ms) never blocks the MQTT event loop (which
+// would risk a missed keepalive). Deletes itself when done.
+static void threshold_persist_task(void *arg)
+{
+    int mv = (int)(intptr_t)arg;
+    esp_err_t err = nvs_store_set_u16(NVS_NS_PUMP, NVS_KEY_THRESHOLD, (uint16_t)mv);
+    ESP_LOGI(TAG, "Feedback threshold persisted: %d mV (%s)",
+             mv, err == ESP_OK ? "ok" : "failed");
+    vTaskDelete(NULL);
 }
 
 esp_err_t pump_set_threshold_mv(int mv)
 {
     if (mv < 100 || mv > 3300) return ESP_ERR_INVALID_ARG;
-    s_threshold_mv = mv;
-    esp_err_t err = nvs_store_set_u16(NVS_NS_PUMP, NVS_KEY_THRESHOLD, (uint16_t)mv);
-    ESP_LOGI(TAG, "Feedback threshold set: %d mV (%s)",
-             mv, err == ESP_OK ? "saved" : "save failed");
-    return err;
+
+    if (s_mutex) {
+        xSemaphoreTake(s_mutex, portMAX_DELAY);
+        s_threshold_mv = mv;
+        xSemaphoreGive(s_mutex);
+    } else {
+        s_threshold_mv = mv;
+    }
+
+    // Persist asynchronously; fall back to an inline write if the worker can't
+    // be spawned (e.g. out of memory).
+    if (xTaskCreate(threshold_persist_task, "thr_nvs", 3072,
+                    (void *)(intptr_t)mv, 3, NULL) != pdPASS) {
+        nvs_store_set_u16(NVS_NS_PUMP, NVS_KEY_THRESHOLD, (uint16_t)mv);
+    }
+    ESP_LOGI(TAG, "Feedback threshold set: %d mV", mv);
+    return ESP_OK;
+}
+
+// Parse the value token immediately after `colon` (skipping spaces and an
+// optional opening quote). Returns 1 for on/true/1, 0 for off/false/0, -1 if
+// unrecognised — so a stray "on"/"1" elsewhere in the payload can't flip it.
+static int parse_bool_token(const char *colon)
+{
+    const char *v = colon + 1;
+    while (*v == ' ' || *v == '\t') v++;
+    if (*v == '"') v++;
+    if (strncmp(v, "on", 2) == 0 || strncmp(v, "true", 4) == 0 || *v == '1') return 1;
+    if (strncmp(v, "off", 3) == 0 || strncmp(v, "false", 5) == 0 || *v == '0') return 0;
+    return -1;
 }
 
 void pump_handle_command(const char *json, int len)
@@ -270,8 +343,9 @@ void pump_handle_command(const char *json, int len)
 
     // {"toggle":true}
     const char *tg = strstr(buf, "\"toggle\"");
-    if (tg && strstr(tg, "true")) {
-        pump_toggle();
+    if (tg) {
+        const char *colon = strchr(tg, ':');
+        if (colon && parse_bool_token(colon) == 1) pump_toggle();
     }
 
     // {"pump":"on"|"off"} or {"pump":true|false}
@@ -279,11 +353,9 @@ void pump_handle_command(const char *json, int len)
     if (p) {
         const char *colon = strchr(p, ':');
         if (colon) {
-            if (strstr(colon, "on") || strstr(colon, "true") || strstr(colon, "1")) {
-                pump_set(true);
-            } else if (strstr(colon, "off") || strstr(colon, "false") || strstr(colon, "0")) {
-                pump_set(false);
-            }
+            int b = parse_bool_token(colon);
+            if (b == 1)      pump_set(true);
+            else if (b == 0) pump_set(false);
         }
     }
 

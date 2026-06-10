@@ -49,6 +49,12 @@
 // output "energised" (pump actually on). Field-tunable from the dashboard.
 #define PUMP_FEEDBACK_ON_THRESHOLD_MV   1600
 
+// Hysteresis band (mV): once ON it only flips back OFF below
+// (threshold - hysteresis). Stops feedback_on from chattering when the sense
+// voltage hovers right at the threshold, which would otherwise emit a retained
+// MQTT state publish every second.
+#define PUMP_FEEDBACK_HYSTERESIS_MV     200
+
 // The C3 ADC pegs near ~3.1 V with ADC_ATTEN_DB_12. A driven 3.3 V line read
 // straight through 10K will saturate — expected and fine (clearly "on"); we
 // just surface the flag for diagnostics.
