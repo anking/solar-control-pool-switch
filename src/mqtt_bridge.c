@@ -76,11 +76,22 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         break;
     }
     case MQTT_EVENT_DATA: {
-        // Only the command topic carries inbound messages; route any to the
-        // pump controller, which decides whether to switch / persist.
+        // Only the command topic carries inbound messages.
         if (event->topic_len >= 4 &&
             memcmp(event->topic + event->topic_len - 4, "/cmd", 4) == 0) {
-            pump_handle_command(event->data, event->data_len);
+            // A message delivered with the retain flag set is a *stored*
+            // command the broker replays to every new subscriber on connect.
+            // The pump must never auto-resume from one (that's how a stale
+            // retained "on" from before the non-retained switch would turn the
+            // pump on at every boot). Ignore it and delete it from the broker
+            // so it can't fire again. Only live (non-retained) commands switch
+            // the pump.
+            if (event->retain) {
+                ESP_LOGW(TAG, "Ignoring + clearing retained command (pump never auto-resumes)");
+                mqtt_bridge_clear_retained_cmd();
+            } else {
+                pump_handle_command(event->data, event->data_len);
+            }
         }
         break;
     }

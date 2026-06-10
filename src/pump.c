@@ -15,7 +15,6 @@
 
 static const char *TAG = "pump";
 
-#define NVS_KEY_STATE      "state"        // u16 0/1: last commanded state
 #define NVS_KEY_THRESHOLD  "fb_thresh_mv" // u16: feedback on/off threshold
 
 static adc_oneshot_unit_handle_t s_adc = NULL;
@@ -25,7 +24,9 @@ static bool                      s_cali_ok = false;
 static SemaphoreHandle_t s_mutex = NULL;
 static pump_reading_t    s_reading = {0};
 
-static volatile bool s_commanded_on = (PUMP_DEFAULT_STATE_ON != 0);
+// The pump ALWAYS boots OFF. Commanded state is never persisted — a power
+// loss, reboot, or OTA must never silently re-energise the pump.
+static volatile bool s_commanded_on = false;
 static int           s_threshold_mv = PUMP_FEEDBACK_ON_THRESHOLD_MV;
 
 // Set the moment commanded state changes; the mismatch check is suppressed
@@ -123,15 +124,12 @@ esp_err_t pump_init(void)
     s_mutex = xSemaphoreCreateMutex();
     if (!s_mutex) return ESP_ERR_NO_MEM;
 
-    // Restore persisted threshold + last commanded state.
+    // Restore the persisted feedback threshold (calibration). The commanded
+    // pump state is deliberately NOT restored — the pump always boots OFF.
     uint16_t stored;
     if (nvs_store_get_u16(NVS_NS_PUMP, NVS_KEY_THRESHOLD, &stored) == ESP_OK && stored > 0) {
         s_threshold_mv = (int)stored;
         ESP_LOGI(TAG, "Loaded feedback threshold: %d mV", s_threshold_mv);
-    }
-    if (nvs_store_get_u16(NVS_NS_PUMP, NVS_KEY_STATE, &stored) == ESP_OK) {
-        s_commanded_on = (stored != 0);
-        ESP_LOGI(TAG, "Restored last pump state: %s", s_commanded_on ? "ON" : "OFF");
     }
 
     // Control output — configure the level BEFORE switching the pin to output,
@@ -148,7 +146,7 @@ esp_err_t pump_init(void)
         ESP_LOGE(TAG, "Output GPIO config failed: %s", esp_err_to_name(err));
         return err;
     }
-    drive_output(s_commanded_on);
+    drive_output(s_commanded_on);  // s_commanded_on == false → boots OFF
     s_last_change_us = esp_timer_get_time();
 
     // Feedback ADC1 oneshot init.
@@ -189,7 +187,7 @@ esp_err_t pump_init(void)
 
     xTaskCreate(sampler_task, "pump_smp", 4096, NULL, 5, NULL);
 
-    ESP_LOGI(TAG, "Pump ready — output GPIO%d (%s=on), feedback GPIO%d (ADC1 ch%d, on>=%dmV)",
+    ESP_LOGI(TAG, "Pump ready (boots OFF) — output GPIO%d (%s=on), feedback GPIO%d (ADC1 ch%d, on>=%dmV)",
              PUMP_OUTPUT_GPIO, PUMP_OUTPUT_ACTIVE_LOW ? "LOW" : "HIGH",
              PUMP_FEEDBACK_GPIO, (int)PUMP_FEEDBACK_ADC_CHANNEL, s_threshold_mv);
     return ESP_OK;
@@ -219,12 +217,9 @@ esp_err_t pump_set(bool on)
         xSemaphoreGive(s_mutex);
     }
 
-    esp_err_t err = nvs_store_set_u16(NVS_NS_PUMP, NVS_KEY_STATE, on ? 1 : 0);
-    ESP_LOGI(TAG, "Pump %s%s (%s)",
-             on ? "ON" : "OFF",
-             changed ? "" : " (no change)",
-             err == ESP_OK ? "saved" : "save failed");
-    return err;
+    // State is intentionally NOT persisted — the pump always boots OFF.
+    ESP_LOGI(TAG, "Pump %s%s", on ? "ON" : "OFF", changed ? "" : " (no change)");
+    return ESP_OK;
 }
 
 esp_err_t pump_toggle(void)

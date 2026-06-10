@@ -62,9 +62,9 @@
 // is treated as a real fault. Covers relay pull-in time and ADC settling.
 #define PUMP_SETTLE_MS                  2000
 
-// On a cold boot (true power cycle, no saved state) start with the pump OFF.
-// A reboot that finds a saved state restores it — see pump.c.
-#define PUMP_DEFAULT_STATE_ON           0
+// Safety: the pump ALWAYS boots OFF. The commanded state is never persisted,
+// so a power loss, reboot, or OTA can never silently re-energise the pump — it
+// stays off until an explicit command turns it on.
 
 // =============================================================================
 // REPORTING

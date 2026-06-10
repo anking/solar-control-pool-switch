@@ -75,20 +75,24 @@ After it joins your network, the dashboard is at `http://<device-ip>/` or
 - **MQTT**: broker config (saved to NVS, optional).
 - **System**: firmware version, heap, restart, LED behavior.
 - **Update**: upload a `.bin` over the air; writes the inactive OTA slot and
-  reboots into it. The pump keeps its state across the reboot.
+  reboots into it. The pump boots OFF after the update.
 
 Live updates push over `/ws` once per second; falls back to polling
 `/api/status` if the WebSocket drops.
 
-## State persistence & daily reboot
+## Boot state & daily reboot
 
-The commanded pump state is persisted to NVS on every change, so it is restored
-exactly across a reboot or a brief power blip. A background task reboots the
-device once per UTC day (at midnight if SNTP synced, else on a 24 h uptime
-fallback, hard-capped at 25 h) — the pump comes back up in the same state.
+**The pump always boots OFF.** The commanded state is *never* persisted, so a
+power loss, reboot, or OTA update can't silently re-energise the pump — it stays
+off until an explicit command turns it on. This is the safe default for an
+unattended mains pump.
 
-On a true cold power-cycle with no saved state, the pump defaults to **OFF**
-(`PUMP_DEFAULT_STATE_ON` in [src/config.h](src/config.h)).
+A background task reboots the device once per UTC day (at midnight if SNTP
+synced, else on a 24 h uptime fallback, hard-capped at 25 h). Note the
+consequence of the always-OFF rule: **the daily reboot turns the pump off.** If
+the pump is driven on a schedule, that schedule lives in whatever commands the
+pump (the cloud / your automation), which simply re-issues the on command — the
+device itself never auto-resumes.
 
 ## MQTT
 
@@ -99,7 +103,7 @@ Topic prefix is `pumps/<mac>/` (MAC with dashes, e.g. `pumps/a1-b2-c3-d4-e5-f6/`
 | `pumps/<mac>/status`      | out | `{"online":true}` / `{"online":false}` (retained, LWT)     |
 | `pumps/<mac>/state`       | out | pump state (retained, QoS 1) — see below                   |
 | `pumps/<mac>/info`        | out | `{model, firmware, output_gpio, feedback_gpio, threshold_mv, ui_url, ui_host}` |
-| `pumps/<mac>/cmd`         | in  | commands (retained) — see below                            |
+| `pumps/<mac>/cmd`         | in  | commands (not retained) — see below                        |
 
 **State** is published report-by-exception: the moment any of `commanded_on`,
 `feedback_on`, or `mismatch` changes, plus a `REPORT_HEARTBEAT_SECONDS` (30 s)
@@ -120,10 +124,16 @@ heartbeat. Payload:
 {"threshold_mv": 1600}  // change the feedback on/off threshold (100–3300)
 ```
 
-Because the command topic is honored as *retained*, the device picks up the
-last command the moment it (re)connects — so a power-cycled controller resumes
-the intended state. Clear a stuck retained command by publishing an empty
-retained payload to the same topic.
+Commands should be published **non-retained** so the pump stays OFF after a
+reboot. (A *retained* command would be redelivered on every reconnect and would
+re-energise the pump right after boot — exactly the auto-resume behaviour the
+always-OFF design avoids. The SolarCloud server publishes these non-retained.)
+
+As a safety net the **firmware itself defends against this**: any command that
+arrives with the MQTT retain flag set (i.e. a stored command the broker replays
+on connect) is ignored *and deleted* from the broker. Only live, non-retained
+commands ever switch the pump — so a stale retained `{"pump":"on"}` left on the
+broker can never turn the pump on at boot.
 
 ## Fault detection
 

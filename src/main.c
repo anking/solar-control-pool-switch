@@ -23,8 +23,8 @@ static const char *TAG = "main";
 //   - If SNTP has synced (year >= 2025), reboot at the next UTC midnight.
 //   - Otherwise, fall back to a 24h-uptime trigger.
 //   - Hard cap at 25h uptime regardless — last-resort if midnight calc misfires.
-// The pump's commanded state is persisted in NVS, so it is restored exactly as
-// it was across the reboot (see pump.c).
+// The pump always boots OFF after the reboot — its state is never persisted, so
+// a reboot can't silently re-energise the pump (see pump.c).
 #define DAILY_REBOOT_MIN_UPTIME_MS   (5LL * 60 * 1000)
 #define DAILY_REBOOT_CHECK_PERIOD_MS (60LL * 1000)
 #define DAILY_REBOOT_UPTIME_CAP_MS   (25LL * 60 * 60 * 1000)
@@ -166,7 +166,7 @@ void app_main(void)
     ret = led_status_init();
     if (ret != ESP_OK) ESP_LOGE(TAG, "LED init failed: %s", esp_err_to_name(ret));
 
-    // Pump output + feedback sampler. Restores the last commanded state from NVS.
+    // Pump output + feedback sampler. Always boots OFF (state is not persisted).
     ret = pump_init();
     if (ret != ESP_OK) ESP_LOGE(TAG, "Pump init failed: %s", esp_err_to_name(ret));
 
