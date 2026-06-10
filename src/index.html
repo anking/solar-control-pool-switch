@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pool Pump</title>
+<style>
+:root{--bg:#0f1626;--surface:#1a2540;--surface2:#243358;--text:#e8edf5;--dim:#8696b8;--accent:#38bdf8;--green:#22c55e;--red:#ef4444;--orange:#f97316;--yellow:#eab308;--blue:#3b82f6;--purple:#a855f7}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+.header{background:var(--surface);padding:12px 20px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--surface2);position:sticky;top:0;z-index:50}
+.header h1{font-size:18px;font-weight:600}
+.header-right{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--dim)}
+.status-dot{width:8px;height:8px;border-radius:50%;background:var(--red);display:inline-block}
+.status-dot.connected{background:var(--green)}
+.tabs{display:flex;gap:0;border-bottom:1px solid var(--surface2);background:var(--surface)}
+.tab{padding:12px 18px;cursor:pointer;color:var(--dim);font-size:14px;font-weight:600;border-bottom:2px solid transparent}
+.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.tab:hover{color:var(--text)}
+.page{max-width:760px;margin:0 auto;padding:16px;display:none}
+.page.active{display:block}
+.card{background:var(--surface);border-radius:12px;padding:16px;margin-bottom:12px;border:1px solid var(--surface2)}
+.card-title{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);margin-bottom:10px}
+.pump-hero{text-align:center;padding:28px 16px}
+.pump-state{font-size:72px;font-weight:800;line-height:.95;letter-spacing:.02em}
+.pump-state.on{color:var(--green);text-shadow:0 0 40px rgba(34,197,94,.25)}
+.pump-state.off{color:var(--dim)}
+.pump-sub{font-size:14px;color:var(--dim);margin-top:8px}
+.toggle-btn{margin-top:22px;padding:14px 40px;font-size:18px;font-weight:700;border:none;border-radius:10px;cursor:pointer;transition:all .15s;color:#000}
+.toggle-btn.turn-on{background:var(--green)}
+.toggle-btn.turn-off{background:var(--red);color:#fff}
+.toggle-btn:hover{filter:brightness(1.08)}
+.toggle-btn:disabled{opacity:.5;cursor:default}
+.pump-secondary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:24px}
+.pump-cell{background:var(--surface2);border-radius:8px;padding:10px 6px;text-align:center}
+.pump-cell-label{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
+.pump-cell-value{font-size:18px;font-weight:700;margin-top:2px}
+.pump-cell-value.good{color:var(--green)}
+.pump-cell-value.bad{color:var(--red)}
+.pump-cell-unit{font-size:11px;color:var(--dim);margin-left:2px}
+.metric{display:flex;justify-content:space-between;align-items:baseline;padding:6px 0;border-bottom:1px solid var(--surface2)}
+.metric:last-child{border-bottom:none}
+.metric-label{font-size:13px;color:var(--dim)}
+.metric-value{font-size:15px;font-weight:600}
+.metric-unit{font-size:11px;color:var(--dim);margin-left:3px}
+.btn{padding:8px 14px;border:1px solid var(--surface2);border-radius:6px;background:var(--surface2);color:var(--text);cursor:pointer;font-size:13px;font-weight:600;transition:all .15s}
+.btn:hover{border-color:var(--accent)}
+.btn-primary{background:var(--accent);color:#000;border-color:var(--accent)}
+.btn-danger{background:var(--red);color:#fff;border-color:var(--red)}
+.btn-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.input,.select{width:100%;padding:8px 10px;border:1px solid var(--surface2);background:var(--bg);color:var(--text);border-radius:6px;font-size:13px}
+.input:focus,.select:focus{outline:none;border-color:var(--accent)}
+.field{margin-bottom:10px}
+.field label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--dim);margin-bottom:4px}
+.networks{margin-top:10px;display:grid;gap:6px}
+.network{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:var(--surface2);border-radius:6px;cursor:pointer;transition:all .15s}
+.network:hover{border:1px solid var(--accent)}
+.network .ssid{font-weight:600;font-size:13px}
+.network .meta{font-size:11px;color:var(--dim)}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--surface2);padding:10px 16px;border-radius:6px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:200}
+.toast.show{opacity:1}
+.toast.error{background:var(--red);color:#fff}
+.toast.success{background:var(--green);color:#000}
+.preset-row{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.preset{padding:5px 10px;background:var(--surface2);border-radius:5px;font-size:11px;cursor:pointer;color:var(--dim);border:1px solid transparent}
+.preset:hover{border-color:var(--accent);color:var(--text)}
+.muted{color:var(--dim);font-size:12px}
+.stale{opacity:.4}
+.progress{margin-top:12px;height:10px;border-radius:5px;background:var(--surface2);overflow:hidden;display:none}
+.progress-bar{height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--blue));transition:width .15s}
+.file-drop{border:1px dashed var(--surface2);border-radius:8px;padding:18px;text-align:center;color:var(--dim);font-size:13px}
+.file-name{margin-top:8px;font-size:13px;color:var(--text);word-break:break-all}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Pool Pump</h1>
+  <div class="header-right">
+    <span id="conn-label">connecting</span>
+    <span class="status-dot" id="conn-dot"></span>
+  </div>
+</div>
+<div class="tabs">
+  <div class="tab active" data-page="pump">Pump</div>
+  <div class="tab" data-page="wifi">WiFi</div>
+  <div class="tab" data-page="mqtt">MQTT</div>
+  <div class="tab" data-page="system">System</div>
+  <div class="tab" data-page="update">Update</div>
+</div>
+
+<!-- PUMP PAGE -->
+<div class="page active" id="page-pump">
+  <div class="card pump-hero">
+    <div class="pump-state off" id="pump-state">--</div>
+    <div class="pump-sub" id="pump-sub">waiting for status…</div>
+
+    <button class="toggle-btn turn-on" id="toggle-btn" onclick="togglePump()" disabled>--</button>
+
+    <div class="pump-secondary">
+      <div class="pump-cell" title="What the firmware is driving the output to">
+        <div class="pump-cell-label">Commanded</div>
+        <div class="pump-cell-value" id="cell-commanded">--</div>
+      </div>
+      <div class="pump-cell" title="Measured on the feedback line (10K sense)">
+        <div class="pump-cell-label">Feedback</div>
+        <div class="pump-cell-value" id="cell-feedback">--</div>
+      </div>
+      <div class="pump-cell">
+        <div class="pump-cell-label">Sense voltage</div>
+        <div class="pump-cell-value"><span id="cell-volts">--</span><span class="pump-cell-unit">V</span></div>
+      </div>
+    </div>
+    <div id="mismatch-warn" style="display:none;margin-top:14px;padding:8px;border-radius:6px;background:rgba(239,68,68,.15);border:1px solid var(--red);font-size:12px;color:var(--red);text-align:left">
+      ⚠ <b>Mismatch:</b> the feedback line doesn't match the commanded state. The relay may be stuck, the driver blown, or the sense wire broken.
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Calibration</div>
+    <p class="muted" style="margin-bottom:10px">The feedback line is read on the ADC through a 10K resistor. Anything at or above the <b>threshold</b> counts as "pump energised". The output drives <b>3.3 V</b> when enabled, so the sense line pegs high — a midpoint threshold (~1600 mV) cleanly separates on from off.</p>
+    <div class="field">
+      <label>Feedback threshold (mV)</label>
+      <input class="input" id="calib-threshold" type="number" step="50" min="100" max="3300">
+    </div>
+    <div class="preset-row">
+      <div class="preset" data-target="calib-threshold" data-val="1600">Default 1600</div>
+      <div class="preset" data-target="calib-threshold" data-val="1000">1000</div>
+      <div class="preset" data-target="calib-threshold" data-val="2000">2000</div>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-primary" onclick="saveCalibration()">Save threshold</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Diagnostics</div>
+    <div class="metric"><span class="metric-label">Sense voltage (1 s avg)</span><span class="metric-value"><span id="diag-volts">--</span><span class="metric-unit">V</span></span></div>
+    <div class="metric"><span class="metric-label">Last sample (mV)</span><span class="metric-value" id="diag-rawmv">--</span></div>
+    <div class="metric"><span class="metric-label">Peak in window (mV)</span><span class="metric-value" id="diag-peakmv">--</span></div>
+    <div class="metric"><span class="metric-label">Active threshold</span><span class="metric-value"><span id="diag-threshold">--</span><span class="metric-unit">mV</span></span></div>
+    <div class="metric"><span class="metric-label">Pump runtime (since boot)</span><span class="metric-value" id="diag-runtime">--</span></div>
+    <div class="metric"><span class="metric-label">ADC samples since boot</span><span class="metric-value" id="diag-samples">--</span></div>
+    <div class="metric"><span class="metric-label">Output GPIO</span><span class="metric-value" id="diag-out-gpio">--</span></div>
+    <div class="metric"><span class="metric-label">Feedback GPIO</span><span class="metric-value" id="diag-fb-gpio">--</span></div>
+  </div>
+</div>
+
+<!-- WIFI PAGE -->
+<div class="page" id="page-wifi">
+  <div class="card">
+    <div class="card-title">Status</div>
+    <div class="metric"><span class="metric-label">Connection</span><span class="metric-value" id="wifi-conn">--</span></div>
+    <div class="metric"><span class="metric-label">SSID</span><span class="metric-value" id="wifi-ssid">--</span></div>
+    <div class="metric"><span class="metric-label">IP</span><span class="metric-value" id="wifi-ip">--</span></div>
+    <div class="metric"><span class="metric-label">RSSI</span><span class="metric-value"><span id="wifi-rssi">--</span><span class="metric-unit">dBm</span></span></div>
+    <div class="metric"><span class="metric-label">Hostname</span><span class="metric-value" id="wifi-host">--</span></div>
+    <div class="metric"><span class="metric-label">AP fallback</span><span class="metric-value" id="wifi-ap">--</span></div>
+    <div class="btn-row">
+      <button class="btn" onclick="loadWifiScan()">Scan</button>
+      <button class="btn btn-danger" onclick="forgetWifi()">Forget</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Connect to network</div>
+    <div class="field">
+      <label>SSID</label>
+      <input class="input" id="wifi-ssid-input" type="text">
+    </div>
+    <div class="field">
+      <label>Password</label>
+      <input class="input" id="wifi-pass-input" type="password">
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-primary" onclick="connectWifi()">Connect</button>
+    </div>
+    <div class="networks" id="networks"></div>
+  </div>
+</div>
+
+<!-- MQTT PAGE -->
+<div class="page" id="page-mqtt">
+  <div class="card">
+    <div class="card-title">Status</div>
+    <div class="metric"><span class="metric-label">Configured</span><span class="metric-value" id="mqtt-cfg">--</span></div>
+    <div class="metric"><span class="metric-label">Connected</span><span class="metric-value" id="mqtt-conn">--</span></div>
+    <div class="metric"><span class="metric-label">Host</span><span class="metric-value" id="mqtt-host">--</span></div>
+    <div class="metric"><span class="metric-label">Publishes</span><span class="metric-value"><span id="mqtt-pub">--</span> ok / <span id="mqtt-fail">--</span> fail</span></div>
+    <div class="metric"><span class="metric-label">Topic prefix</span><span class="metric-value" style="font-family:monospace;font-size:12px">pumps/<span id="mqtt-mac">--</span>/</span></div>
+    <div class="metric"><span class="metric-label">Last error</span><span class="metric-value" id="mqtt-err" style="font-size:12px;color:var(--orange)">--</span></div>
+  </div>
+  <div class="card">
+    <div class="card-title">Broker</div>
+    <p class="muted" style="margin-bottom:10px">State is pushed report-by-exception to <code>pumps/&lt;mac&gt;/state</code> (retained). Command the pump remotely by publishing to <code>pumps/&lt;mac&gt;/cmd</code>: <code>{"pump":"on"}</code>, <code>{"pump":"off"}</code>, or <code>{"toggle":true}</code>.</p>
+    <div class="field"><label>Host</label><input class="input" id="mqtt-host-input" type="text" placeholder="broker.example.com"></div>
+    <div class="field"><label>Port</label><input class="input" id="mqtt-port-input" type="number" value="1883"></div>
+    <div class="field"><label>Username (optional)</label><input class="input" id="mqtt-user-input" type="text"></div>
+    <div class="field"><label>Password (optional)</label><input class="input" id="mqtt-pass-input" type="password"></div>
+    <div class="btn-row">
+      <button class="btn btn-primary" onclick="saveMqtt()">Save & Connect</button>
+      <button class="btn btn-danger" onclick="clearMqtt()">Clear</button>
+    </div>
+  </div>
+</div>
+
+<!-- SYSTEM PAGE -->
+<div class="page" id="page-system">
+  <div class="card">
+    <div class="card-title">Device</div>
+    <div class="metric"><span class="metric-label">Firmware</span><span class="metric-value" id="sys-fw">--</span></div>
+    <div class="metric"><span class="metric-label">Git hash</span><span class="metric-value" id="sys-git" style="font-family:monospace;font-size:12px">--</span></div>
+    <div class="metric"><span class="metric-label">IDF version</span><span class="metric-value" id="sys-idf" style="font-family:monospace;font-size:12px">--</span></div>
+    <div class="metric"><span class="metric-label">Built</span><span class="metric-value" id="sys-built" style="font-size:12px">--</span></div>
+    <div class="metric"><span class="metric-label">Board</span><span class="metric-value" id="sys-board">--</span></div>
+    <div class="metric"><span class="metric-label">Free heap</span><span class="metric-value"><span id="sys-heap">--</span><span class="metric-unit">B</span></span></div>
+    <div class="metric"><span class="metric-label">Min free heap</span><span class="metric-value"><span id="sys-heap-min">--</span><span class="metric-unit">B</span></span></div>
+    <div class="btn-row">
+      <button class="btn btn-danger" onclick="restartDevice()">Restart</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">LED behavior</div>
+    <p class="muted" style="margin-bottom:10px">
+      <b>Errors only</b> (default): off when everything's fine, brief blink for WiFi faults, triple-blink for a pump feedback mismatch.
+      <b>Off</b>: never lights up. <b>Debug</b>: solid on when WiFi connected.
+    </p>
+    <div class="btn-row" id="led-modes">
+      <button class="btn" data-mode="errors">Errors only</button>
+      <button class="btn" data-mode="off">Off</button>
+      <button class="btn" data-mode="debug">Debug</button>
+    </div>
+  </div>
+</div>
+
+<!-- UPDATE PAGE -->
+<div class="page" id="page-update">
+  <div class="card">
+    <div class="card-title">Firmware update (OTA)</div>
+    <div class="metric" style="margin-bottom:4px">
+      <span class="metric-label">Running firmware</span>
+      <span class="metric-value"><span id="ota-current">--</span>
+        <span class="metric-unit" id="ota-current-git" style="font-family:monospace"></span></span>
+    </div>
+    <div class="metric" style="margin-bottom:12px">
+      <span class="metric-label">Built</span>
+      <span class="metric-value" id="ota-current-built" style="font-size:12px">--</span>
+    </div>
+    <p class="muted" style="margin-bottom:12px">
+      Upload a compiled firmware image (<code>.bin</code> — built with
+      <code>pio run</code>, found under <code>.pio/build/&lt;env&gt;/firmware.bin</code>).
+      The device writes it to the inactive slot, then reboots into the new
+      image. The pump keeps its current state across the reboot. Don't power off
+      during the upload.
+    </p>
+    <div class="field">
+      <label>Firmware image</label>
+      <div class="file-drop">
+        <input type="file" id="ota-file" accept=".bin,application/octet-stream">
+        <div class="file-name" id="ota-file-name"></div>
+      </div>
+    </div>
+    <div class="progress" id="ota-progress"><div class="progress-bar" id="ota-bar"></div></div>
+    <div class="muted" id="ota-status" style="margin-top:8px"></div>
+    <div class="btn-row">
+      <button class="btn btn-primary" id="ota-upload-btn" onclick="uploadFirmware()">Upload &amp; restart</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+let ws = null;
+let wsRetry = 0;
+let staleTimer = null;
+let lastCommanded = null;   // tracks the current commanded state for the toggle button
+
+function toast(msg, kind='') {
+  const t = $('toast');
+  t.textContent = msg;
+  t.className = 'toast show ' + kind;
+  setTimeout(() => t.className = 'toast', 2200);
+}
+
+// Tabs
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.onclick = () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    $('page-' + tab.dataset.page).classList.add('active');
+    if (tab.dataset.page === 'wifi') refreshWifi();
+    if (tab.dataset.page === 'mqtt') refreshMqtt();
+    if (tab.dataset.page === 'system') refreshSystem();
+    if (tab.dataset.page === 'update') refreshUpdate();
+  };
+});
+
+// Live update via WebSocket; fall back to polling.
+function connectWs() {
+  try {
+    ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+    ws.onopen = () => { wsRetry = 0; setConn(true); };
+    ws.onclose = () => {
+      setConn(false);
+      wsRetry++;
+      setTimeout(connectWs, Math.min(wsRetry * 1000, 10000));
+    };
+    ws.onerror = () => { try { ws.close(); } catch(e){} };
+    ws.onmessage = e => {
+      try { applyStatus(JSON.parse(e.data)); } catch(err) {}
+    };
+  } catch (e) {
+    setConn(false);
+    setTimeout(connectWs, 3000);
+  }
+}
+
+function setConn(ok) {
+  $('conn-dot').className = 'status-dot' + (ok ? ' connected' : '');
+  $('conn-label').textContent = ok ? 'live' : 'reconnecting';
+}
+
+function markStale() {
+  document.querySelectorAll('.pump-hero').forEach(e => e.classList.add('stale'));
+}
+function clearStale() {
+  document.querySelectorAll('.pump-hero').forEach(e => e.classList.remove('stale'));
+  clearTimeout(staleTimer);
+  staleTimer = setTimeout(markStale, 8000);
+}
+
+function applyStatus(s) {
+  if (!s) return;
+  clearStale();
+
+  const on = s.commanded_on;
+  lastCommanded = on;
+
+  // Hero state
+  const st = $('pump-state');
+  st.textContent = on ? 'ON' : 'OFF';
+  st.className = 'pump-state ' + (on ? 'on' : 'off');
+
+  // Toggle button reflects the action it will take
+  const btn = $('toggle-btn');
+  btn.disabled = false;
+  if (on) { btn.textContent = 'Turn OFF'; btn.className = 'toggle-btn turn-off'; }
+  else    { btn.textContent = 'Turn ON';  btn.className = 'toggle-btn turn-on'; }
+
+  // Sub line / cells
+  $('pump-sub').textContent = s.mismatch
+    ? 'commanded ' + (on ? 'ON' : 'OFF') + ', but feedback says ' + (s.feedback_on ? 'ON' : 'OFF')
+    : 'feedback confirms ' + (s.feedback_on ? 'ON' : 'OFF');
+
+  const cc = $('cell-commanded');
+  cc.textContent = on ? 'ON' : 'OFF';
+  cc.className = 'pump-cell-value ' + (on ? 'good' : '');
+
+  const cf = $('cell-feedback');
+  cf.textContent = s.feedback_on ? 'ON' : 'OFF';
+  cf.className = 'pump-cell-value ' + (s.mismatch ? 'bad' : (s.feedback_on ? 'good' : ''));
+
+  $('cell-volts').textContent = s.feedback_v.toFixed(2);
+  $('mismatch-warn').style.display = s.mismatch ? 'block' : 'none';
+
+  // Diagnostics
+  $('diag-volts').textContent = s.feedback_v.toFixed(3);
+  $('diag-rawmv').textContent = s.raw_mv;
+  $('diag-peakmv').textContent = s.peak_mv;
+  $('diag-threshold').textContent = s.threshold_mv;
+  $('diag-runtime').textContent = fmtDuration(s.on_seconds);
+  $('diag-samples').textContent = s.samples.toLocaleString();
+  $('diag-out-gpio').textContent = 'GPIO ' + s.output_gpio;
+  $('diag-fb-gpio').textContent = 'GPIO ' + s.feedback_gpio;
+}
+
+function fmtDuration(sec) {
+  sec = Math.floor(sec || 0);
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+async function poll() {
+  try {
+    const r = await fetch('/api/status');
+    if (r.ok) applyStatus(await r.json());
+  } catch(e) {}
+}
+
+// Pump control
+async function setPump(on) {
+  try {
+    const r = await fetch('/api/pump', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({on})
+    });
+    if (r.ok) { applyStatus(await r.json()); toast('Pump ' + (on ? 'ON' : 'OFF'), 'success'); }
+    else toast('Command failed', 'error');
+  } catch(e) { toast('Command failed', 'error'); }
+}
+
+function togglePump() {
+  if (lastCommanded === null) return;
+  const target = !lastCommanded;
+  const verb = target ? 'turn the pump ON' : 'turn the pump OFF';
+  if (!confirm('Are you sure you want to ' + verb + '?')) return;
+  setPump(target);
+}
+
+// Calibration (feedback threshold)
+async function saveCalibration() {
+  const th = parseInt($('calib-threshold').value, 10);
+  if (!(th >= 100 && th <= 3300)) { toast('Threshold must be 100–3300 mV', 'error'); return; }
+  try {
+    const r = await fetch('/api/calibrate', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({threshold_mv: th})
+    });
+    if (r.ok) toast('Threshold saved', 'success'); else toast('Save failed', 'error');
+  } catch(e) { toast('Save failed', 'error'); }
+}
+
+document.querySelectorAll('.preset').forEach(p => {
+  p.onclick = () => {
+    const target = p.dataset.target || 'calib-threshold';
+    $(target).value = p.dataset.val;
+  };
+});
+
+// WiFi
+async function refreshWifi() {
+  try {
+    const r = await fetch('/api/wifi/status');
+    if (!r.ok) return;
+    const s = await r.json();
+    $('wifi-conn').textContent = s.connected ? 'connected' : 'disconnected';
+    $('wifi-ssid').textContent = s.ssid || '—';
+    $('wifi-ip').textContent = s.ip || '—';
+    $('wifi-rssi').textContent = s.rssi || '--';
+    $('wifi-host').textContent = s.hostname ? (s.hostname + '.local') : '—';
+    $('wifi-ap').textContent = s.ap_active ? `${s.ap_ssid} (${s.ap_clients} clients)` : 'off';
+  } catch(e) {}
+}
+
+async function loadWifiScan() {
+  $('networks').innerHTML = '<div class="muted">Scanning…</div>';
+  try {
+    const r = await fetch('/api/wifi/scan');
+    if (!r.ok) { $('networks').innerHTML = '<div class="muted">Scan failed</div>'; return; }
+    const nets = await r.json();
+    if (!nets.length) { $('networks').innerHTML = '<div class="muted">No networks found</div>'; return; }
+    $('networks').innerHTML = nets.map(n => `
+      <div class="network" data-ssid="${n.ssid}">
+        <span class="ssid">${n.ssid}</span>
+        <span class="meta">${n.rssi} dBm · ${n.auth}</span>
+      </div>
+    `).join('');
+    document.querySelectorAll('.network').forEach(el => {
+      el.onclick = () => { $('wifi-ssid-input').value = el.dataset.ssid; };
+    });
+  } catch(e) { $('networks').innerHTML = '<div class="muted">Scan failed</div>'; }
+}
+
+async function connectWifi() {
+  const ssid = $('wifi-ssid-input').value.trim();
+  const password = $('wifi-pass-input').value;
+  if (!ssid) { toast('SSID required', 'error'); return; }
+  try {
+    const r = await fetch('/api/wifi/connect', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ssid, password})
+    });
+    if (r.ok) {
+      toast('Connecting…', 'success');
+      setTimeout(refreshWifi, 3000);
+    } else toast('Connect failed', 'error');
+  } catch(e) { toast('Connect failed', 'error'); }
+}
+
+async function forgetWifi() {
+  if (!confirm('Forget saved WiFi credentials?')) return;
+  await fetch('/api/wifi/forget', {method:'POST'});
+  toast('Forgotten', 'success');
+  setTimeout(refreshWifi, 500);
+}
+
+// MQTT
+async function refreshMqtt() {
+  try {
+    const r = await fetch('/api/mqtt');
+    if (!r.ok) return;
+    const s = await r.json();
+    $('mqtt-cfg').textContent = s.configured ? 'yes' : 'no';
+    $('mqtt-conn').textContent = s.connected ? 'connected' : 'disconnected';
+    $('mqtt-host').textContent = s.host ? `${s.host}:${s.port}` : '—';
+    $('mqtt-pub').textContent = s.pub_ok;
+    $('mqtt-fail').textContent = s.pub_fail;
+    $('mqtt-mac').textContent = s.mac || '—';
+    $('mqtt-err').textContent = s.error || '—';
+    if (s.host) $('mqtt-host-input').value = s.host;
+    if (s.port) $('mqtt-port-input').value = s.port;
+  } catch(e) {}
+}
+
+async function saveMqtt() {
+  const host = $('mqtt-host-input').value.trim();
+  const port = parseInt($('mqtt-port-input').value) || 1883;
+  const username = $('mqtt-user-input').value;
+  const password = $('mqtt-pass-input').value;
+  if (!host) { toast('Host required', 'error'); return; }
+  try {
+    const r = await fetch('/api/mqtt', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({host, port, username, password})
+    });
+    if (r.ok) { toast('Saved', 'success'); setTimeout(refreshMqtt, 1000); }
+    else toast('Save failed', 'error');
+  } catch(e) { toast('Save failed', 'error'); }
+}
+
+async function clearMqtt() {
+  if (!confirm('Clear MQTT config?')) return;
+  await fetch('/api/mqtt', {method:'DELETE'});
+  toast('Cleared', 'success');
+  setTimeout(refreshMqtt, 500);
+}
+
+// System
+async function refreshSystem() {
+  try {
+    const r = await fetch('/api/system');
+    if (!r.ok) return;
+    const s = await r.json();
+    $('sys-fw').textContent = s.firmware_version;
+    $('sys-git').textContent = s.git_hash;
+    $('sys-idf').textContent = s.idf_version;
+    $('sys-built').textContent = (s.build_date && s.build_time) ? `${s.build_date} ${s.build_time}` : '—';
+    $('sys-board').textContent = s.board;
+    $('sys-heap').textContent = s.free_heap.toLocaleString();
+    $('sys-heap-min').textContent = s.min_free_heap.toLocaleString();
+  } catch(e) {}
+  refreshLed();
+}
+
+async function refreshLed() {
+  try {
+    const r = await fetch('/api/led');
+    if (!r.ok) return;
+    const s = await r.json();
+    document.querySelectorAll('#led-modes .btn').forEach(b => {
+      b.classList.toggle('btn-primary', b.dataset.mode === s.mode);
+    });
+  } catch(e) {}
+}
+
+async function setLedMode(mode) {
+  try {
+    const r = await fetch('/api/led', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({mode})
+    });
+    if (r.ok) { toast('LED mode: ' + mode, 'success'); refreshLed(); }
+    else toast('Save failed', 'error');
+  } catch(e) { toast('Save failed', 'error'); }
+}
+
+document.querySelectorAll('#led-modes .btn').forEach(b => {
+  b.onclick = () => setLedMode(b.dataset.mode);
+});
+
+async function restartDevice() {
+  if (!confirm('Restart the device? The pump keeps its current state.')) return;
+  try {
+    await fetch('/api/restart', {method:'POST'});
+    toast('Restarting…', 'success');
+  } catch(e) { toast('Restart failed', 'error'); }
+}
+
+// OTA firmware update
+async function refreshUpdate() {
+  try {
+    const r = await fetch('/api/system');
+    if (!r.ok) return;
+    const s = await r.json();
+    $('ota-current').textContent = s.firmware_version;
+    $('ota-current-git').textContent = s.git_hash;
+    $('ota-current-built').textContent = (s.build_date && s.build_time) ? `${s.build_date} ${s.build_time}` : '—';
+  } catch(e) {}
+}
+
+// Read the descriptor embedded in an ESP32 app image (esp_app_desc_t).
+// Layout: esp_image_header_t (24 B) + esp_image_segment_header_t (8 B) =>
+// esp_app_desc_t at file offset 32; within it: magic@+0 (0xABCD5432),
+// version[32]@+16, time[16]@+80, date[16]@+96.
+async function readBinInfo(file) {
+  try {
+    const buf = new Uint8Array(await file.slice(0, 144).arrayBuffer());
+    if (new DataView(buf.buffer).getUint32(32, true) !== 0xABCD5432) return null;
+    const str = (off, len) => {
+      let s = '';
+      for (let i = off; i < off + len && buf[i]; i++) s += String.fromCharCode(buf[i]);
+      return s;
+    };
+    return { version: str(48, 32), time: str(112, 16), date: str(128, 16) };
+  } catch(e) { return {}; }
+}
+
+$('ota-file').onchange = async () => {
+  const f = $('ota-file').files[0];
+  if (!f) { $('ota-file-name').textContent = ''; return; }
+  let info = `${f.name} (${(f.size / 1024).toFixed(0)} KB)`;
+  const inf = await readBinInfo(f);
+  if (inf === null) {
+    info += ' — ⚠ not a valid ESP32 firmware image';
+  } else if (inf.version) {
+    info += ` — v${inf.version}` + (inf.date ? ` (built ${inf.date} ${inf.time})` : '');
+  }
+  $('ota-file-name').textContent = info;
+};
+
+function uploadFirmware() {
+  const f = $('ota-file').files[0];
+  if (!f) { toast('Choose a .bin file first', 'error'); return; }
+  if (!confirm(`Flash "${f.name}" and restart the device?`)) return;
+
+  const btn = $('ota-upload-btn');
+  const bar = $('ota-bar');
+  const prog = $('ota-progress');
+  btn.disabled = true;
+  prog.style.display = 'block';
+  bar.style.width = '0%';
+  $('ota-status').textContent = 'Uploading…';
+
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/ota');
+  xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+  xhr.upload.onprogress = e => {
+    if (e.lengthComputable) {
+      const pct = Math.round(e.loaded / e.total * 100);
+      bar.style.width = pct + '%';
+      $('ota-status').textContent = `Uploading… ${pct}%`;
+    }
+  };
+  xhr.onload = () => {
+    btn.disabled = false;
+    if (xhr.status === 200) {
+      bar.style.width = '100%';
+      let r = {};
+      try { r = JSON.parse(xhr.responseText); } catch(e) {}
+      const ver = r.version || '';
+      const built = (r.build_date && r.build_time) ? ` (built ${r.build_date} ${r.build_time})` : '';
+      $('ota-status').textContent = (ver ? `Flashed v${ver}${built}. ` : '') +
+        'Device is rebooting into the new firmware. Reconnecting…';
+      toast(ver ? `Flashed v${ver}, rebooting` : 'Firmware flashed, rebooting', 'success');
+      setTimeout(() => location.reload(), 12000);
+    } else {
+      let msg = 'Update failed';
+      try { msg = JSON.parse(xhr.responseText).error || msg; } catch(e) { if (xhr.responseText) msg = xhr.responseText; }
+      $('ota-status').textContent = msg;
+      toast(msg, 'error');
+    }
+  };
+  xhr.onerror = () => {
+    btn.disabled = false;
+    $('ota-status').textContent = 'Upload failed (connection lost)';
+    toast('Upload failed', 'error');
+  };
+  xhr.send(f);
+}
+
+// Boot
+(async function init() {
+  try {
+    const r = await fetch('/api/status');
+    if (r.ok) {
+      const s = await r.json();
+      $('calib-threshold').value = s.threshold_mv;
+      applyStatus(s);
+    }
+  } catch(e) {}
+  refreshWifi();
+  refreshSystem();
+  connectWs();
+  setInterval(poll, 2000);
+})();
+</script>
+</body>
+</html>
