@@ -13,7 +13,8 @@
 static const char *TAG = "mqtt_bridge";
 
 static esp_mqtt_client_handle_t s_client = NULL;
-static bool     s_connected = false;
+// Written by the MQTT event task, read from HTTP handlers / the broadcaster.
+static volatile bool s_connected = false;
 static char     s_mac_str[18] = {0};
 static char     s_host[64] = {0};
 static int      s_port = 1883;
@@ -76,6 +77,15 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         break;
     }
     case MQTT_EVENT_DATA: {
+        // Payloads larger than the MQTT RX buffer arrive fragmented across
+        // multiple events (only the first carries the topic). Real commands are
+        // tiny, so anything fragmented is garbage — ignore it rather than parse
+        // a partial JSON.
+        if (event->total_data_len != event->data_len) {
+            ESP_LOGW(TAG, "Ignoring fragmented MQTT payload (%d of %d bytes)",
+                     event->data_len, event->total_data_len);
+            break;
+        }
         // Only the command topic carries inbound messages.
         if (event->topic_len >= 4 &&
             memcmp(event->topic + event->topic_len - 4, "/cmd", 4) == 0) {
@@ -202,13 +212,23 @@ void mqtt_bridge_publish_info(void)
     wifi_status_t wifi;
     wifi_manager_get_status(&wifi);
 
+    // Pick a reachable IP for the deep link: STA when connected, the AP
+    // fallback address otherwise. Empty string (no IP at all) rather than a
+    // malformed "http:///" — the cloud treats an empty ui_url as absent.
+    char ui_url[40] = "";
+    if (wifi.connected && wifi.ip[0]) {
+        snprintf(ui_url, sizeof(ui_url), "http://%s/", wifi.ip);
+    } else if (wifi.ap_active && wifi.ap_ip[0]) {
+        snprintf(ui_url, sizeof(ui_url), "http://%s/", wifi.ap_ip);
+    }
+
     char buf[384];
     int len = snprintf(buf, sizeof(buf),
         "{\"model\":\"esp32-c3-pool-switch\",\"firmware\":\"%s\","
         "\"output_gpio\":%d,\"feedback_gpio\":%d,\"pressure_gpio\":%d,\"threshold_mv\":%d,"
-        "\"ui_url\":\"http://%s/\",\"ui_host\":\"%s.local\"}",
+        "\"ui_url\":\"%s\",\"ui_host\":\"%s.local\"}",
         fw, PUMP_OUTPUT_GPIO, PUMP_FEEDBACK_GPIO, PRESSURE_GPIO, pump_get_threshold_mv(),
-        wifi.ip, wifi.hostname);
+        ui_url, wifi.hostname);
 
     int msg_id = esp_mqtt_client_publish(s_client, topic, buf, len, 1, 1);
     if (msg_id >= 0) {
@@ -230,6 +250,7 @@ void mqtt_bridge_publish_state(const pump_reading_t *r)
         "{\"commanded_on\":%s,\"feedback_on\":%s,\"mismatch\":%s,"
         "\"feedback_v\":%.3f,\"feedback_mv\":%d,\"saturated\":%s,"
         "\"threshold_mv\":%d,\"pressure_psi\":%.1f,\"pressure_v\":%.3f,"
+        "\"pressure_valid\":%s,\"failsafe_off\":%s,"
         "\"on_seconds\":%lu}",
         r->commanded_on ? "true" : "false",
         r->feedback_on  ? "true" : "false",
@@ -238,6 +259,8 @@ void mqtt_bridge_publish_state(const pump_reading_t *r)
         r->saturated ? "true" : "false",
         r->threshold_mv,
         r->pressure_psi, r->pressure_v,
+        r->pressure_valid ? "true" : "false",
+        r->failsafe_off ? "true" : "false",
         (unsigned long)r->on_seconds);
 
     // Retained QoS 1: the latest state is always available to a new subscriber.

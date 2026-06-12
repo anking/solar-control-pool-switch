@@ -37,6 +37,9 @@ static int           s_threshold_mv = PUMP_FEEDBACK_ON_THRESHOLD_MV;
 static int64_t  s_last_change_us = 0;
 static uint32_t s_on_seconds     = 0;
 static uint32_t s_sample_count   = 0;
+// Latched when a safety failsafe turned the pump off; cleared by the next real
+// commanded change. Guarded by s_mutex.
+static bool     s_failsafe_off   = false;
 
 static inline void drive_output(bool on)
 {
@@ -83,6 +86,7 @@ static void sampler_task(void *arg)
     int    in_window = 0;
     int    sum_mv = 0;
     int    sum_pmv = 0;
+    int    p_count = 0;
     int    peak_mv = 0;
     TickType_t last = xTaskGetTickCount();
 
@@ -95,25 +99,29 @@ static void sampler_task(void *arg)
         int mv = raw_to_mv(s_cali, s_cali_ok, raw);
         s_sample_count++;
 
-        // Pressure transducer on the second ADC1 channel (same unit).
+        // Pressure transducer on the second ADC1 channel (same unit). Failed
+        // reads are EXCLUDED from the average (a zero would drag the mean down
+        // and read as falsely low pressure); p_count tracks the good samples so
+        // a fully-dead channel is flagged invalid rather than reading 0 psi.
         int praw = 0;
-        int pmv = 0;
         if (adc_oneshot_read(s_adc, PRESSURE_ADC_CHANNEL, &praw) == ESP_OK) {
-            pmv = raw_to_mv(s_cali_pressure, s_cali_pressure_ok, praw);
+            sum_pmv += raw_to_mv(s_cali_pressure, s_cali_pressure_ok, praw);
+            p_count++;
         }
 
         sum_mv += mv;
-        sum_pmv += pmv;
         if (mv > peak_mv) peak_mv = mv;
         in_window++;
 
         if (in_window >= samples_per_s) {
             int avg_mv = sum_mv / in_window;
-            int avg_pmv = sum_pmv / in_window;
+            bool p_valid = p_count > 0;
+            int avg_pmv = p_valid ? sum_pmv / p_count : 0;
             int captured_peak = peak_mv;
             in_window = 0;
             sum_mv = 0;
             sum_pmv = 0;
+            p_count = 0;
             peak_mv = 0;
 
             int64_t now_us = esp_timer_get_time();
@@ -153,9 +161,11 @@ static void sampler_task(void *arg)
             s_reading.threshold_mv   = threshold;
             // pressure_v is the recovered transducer voltage (0.5-4.5 V range);
             // pressure_mv stays the raw mV at the ADC pin for diagnostics.
-            s_reading.pressure_v     = pressure_source_mv(avg_pmv) / 1000.0f;
+            s_reading.pressure_valid = p_valid;
+            s_reading.pressure_v     = p_valid ? pressure_source_mv(avg_pmv) / 1000.0f : 0.0f;
             s_reading.pressure_mv    = avg_pmv;
-            s_reading.pressure_psi   = pressure_mv_to_psi(avg_pmv);
+            s_reading.pressure_psi   = p_valid ? pressure_mv_to_psi(avg_pmv) : 0.0f;
+            s_reading.failsafe_off   = s_failsafe_off;
             s_reading.output_gpio    = PUMP_OUTPUT_GPIO;
             s_reading.feedback_gpio  = PUMP_FEEDBACK_GPIO;
             s_reading.pressure_gpio  = PRESSURE_GPIO;
@@ -268,24 +278,33 @@ void pump_get(pump_reading_t *out)
 }
 
 // Apply a commanded state. MUST be called with s_mutex held — drives the
-// output, stamps the settle timer, and reflects the change into s_reading
-// immediately so a status read between sampler ticks isn't stale.
-static void apply_state_locked(bool on)
+// output and reflects the change into s_reading immediately so a status read
+// between sampler ticks isn't stale. The settle timer / mismatch suppression
+// is reset ONLY on a real state change: a redundant re-send of the current
+// state must not keep restarting the settle window (that would let a looping
+// "on" command suppress stuck-relay fault detection indefinitely) nor reset
+// the max-runtime failsafe clock. Returns whether the state actually changed.
+static bool apply_state_locked(bool on)
 {
-    s_commanded_on   = on;
-    s_last_change_us = esp_timer_get_time();
+    bool changed = (on != s_commanded_on);
+    s_commanded_on = on;
     drive_output(on);
-    s_reading.commanded_on   = on;
-    s_reading.last_change_us = s_last_change_us;
-    s_reading.mismatch       = false;  // suppressed during the settle window
+    s_reading.commanded_on = on;
+    if (changed) {
+        s_last_change_us = esp_timer_get_time();
+        s_reading.last_change_us = s_last_change_us;
+        s_reading.mismatch       = false;  // suppressed during the settle window
+        s_failsafe_off           = false;  // a real command supersedes a failsafe trip
+        s_reading.failsafe_off   = false;
+    }
+    return changed;
 }
 
 esp_err_t pump_set(bool on)
 {
     if (!s_mutex) return ESP_FAIL;
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    bool changed = (on != s_commanded_on);
-    apply_state_locked(on);
+    bool changed = apply_state_locked(on);
     xSemaphoreGive(s_mutex);
 
     // State is intentionally NOT persisted — the pump always boots OFF.
@@ -335,38 +354,66 @@ int pump_get_threshold_mv(void)
     return v;
 }
 
-// One-shot worker that commits the threshold to NVS off the caller's task, so
-// the flash erase/write (tens of ms) never blocks the MQTT event loop (which
-// would risk a missed keepalive). Deletes itself when done.
+// Threshold NVS persistence runs on a single worker so the flash erase/write
+// (tens of ms) never blocks the MQTT event loop, and rapid successive commands
+// can't spawn concurrent writers racing each other (last-set value always wins:
+// the worker drains until what it wrote matches the latest request). Both
+// fields are guarded by s_mutex.
+static int  s_persist_mv      = -1;     // latest threshold awaiting persistence
+static bool s_persist_running = false;
+
 static void threshold_persist_task(void *arg)
 {
-    int mv = (int)(intptr_t)arg;
-    esp_err_t err = nvs_store_set_u16(NVS_NS_PUMP, NVS_KEY_THRESHOLD, (uint16_t)mv);
-    ESP_LOGI(TAG, "Feedback threshold persisted: %d mV (%s)",
-             mv, err == ESP_OK ? "ok" : "failed");
+    int last_written = -1;
+    for (;;) {
+        xSemaphoreTake(s_mutex, portMAX_DELAY);
+        int mv = s_persist_mv;
+        if (mv == last_written) {
+            s_persist_running = false;
+            xSemaphoreGive(s_mutex);
+            break;
+        }
+        xSemaphoreGive(s_mutex);
+
+        esp_err_t err = nvs_store_set_u16(NVS_NS_PUMP, NVS_KEY_THRESHOLD, (uint16_t)mv);
+        ESP_LOGI(TAG, "Feedback threshold persisted: %d mV (%s)",
+                 mv, err == ESP_OK ? "ok" : "failed");
+        last_written = mv;
+    }
     vTaskDelete(NULL);
 }
 
 esp_err_t pump_set_threshold_mv(int mv)
 {
     if (mv < 100 || mv > 3300) return ESP_ERR_INVALID_ARG;
+    if (!s_mutex) return ESP_FAIL;
 
-    if (s_mutex) {
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_threshold_mv = mv;
+    s_persist_mv   = mv;
+    bool spawn = !s_persist_running;
+    if (spawn) s_persist_running = true;
+    xSemaphoreGive(s_mutex);
+
+    if (spawn && xTaskCreate(threshold_persist_task, "thr_nvs", 3072,
+                             NULL, 3, NULL) != pdPASS) {
+        // Worker couldn't start (out of memory): write inline as a fallback.
         xSemaphoreTake(s_mutex, portMAX_DELAY);
-        s_threshold_mv = mv;
+        s_persist_running = false;
         xSemaphoreGive(s_mutex);
-    } else {
-        s_threshold_mv = mv;
-    }
-
-    // Persist asynchronously; fall back to an inline write if the worker can't
-    // be spawned (e.g. out of memory).
-    if (xTaskCreate(threshold_persist_task, "thr_nvs", 3072,
-                    (void *)(intptr_t)mv, 3, NULL) != pdPASS) {
         nvs_store_set_u16(NVS_NS_PUMP, NVS_KEY_THRESHOLD, (uint16_t)mv);
     }
     ESP_LOGI(TAG, "Feedback threshold set: %d mV", mv);
     return ESP_OK;
+}
+
+void pump_note_failsafe_off(void)
+{
+    if (!s_mutex) return;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_failsafe_off = true;
+    s_reading.failsafe_off = true;
+    xSemaphoreGive(s_mutex);
 }
 
 // Parse the value token immediately after `colon` (skipping spaces and an

@@ -365,7 +365,8 @@ function applyStatus(s) {
   cf.textContent = s.feedback_on ? 'ON' : 'OFF';
   cf.className = 'pump-cell-value ' + (s.mismatch ? 'bad' : (s.feedback_on ? 'good' : ''));
 
-  $('cell-psi').textContent = (typeof s.pressure_psi === 'number') ? s.pressure_psi.toFixed(1) : '--';
+  const pOk = (typeof s.pressure_psi === 'number') && s.pressure_valid !== false;
+  $('cell-psi').textContent = pOk ? s.pressure_psi.toFixed(1) : '--';
   $('mismatch-warn').style.display = s.mismatch ? 'block' : 'none';
 
   // Diagnostics
@@ -373,7 +374,11 @@ function applyStatus(s) {
   $('diag-rawmv').textContent = s.raw_mv;
   $('diag-peakmv').textContent = s.peak_mv;
   $('diag-threshold').textContent = s.threshold_mv;
-  if (typeof s.pressure_psi === 'number') $('diag-pressure').textContent = s.pressure_psi.toFixed(1) + ' psi (' + s.pressure_v.toFixed(3) + ' V)';
+  if (typeof s.pressure_psi === 'number') {
+    $('diag-pressure').textContent = pOk
+      ? s.pressure_psi.toFixed(1) + ' psi (' + s.pressure_v.toFixed(3) + ' V)'
+      : 'sensor fault — no ADC reading';
+  }
   $('diag-runtime').textContent = fmtDuration(s.on_seconds);
   $('diag-samples').textContent = s.samples.toLocaleString();
   $('diag-out-gpio').textContent = 'GPIO ' + s.output_gpio;

@@ -60,9 +60,9 @@
 // just surface the flag for diagnostics.
 #define PUMP_FEEDBACK_SATURATION_MV     3000
 
-// Feedback sampling: oversample the ADC at this rate, average to a 1 Hz value.
+// Feedback sampling: oversample the ADC at this rate; the sampler averages one
+// second's worth of samples into each 1 Hz reading.
 #define PUMP_FEEDBACK_OVERSAMPLE_HZ     100
-#define PUMP_SAMPLE_INTERVAL_MS         1000
 
 // Grace window after a commanded change before a commanded/feedback mismatch
 // is treated as a real fault. Covers relay pull-in time and ADC settling.

@@ -19,10 +19,16 @@ typedef struct {
     int       peak_mv;          // peak instantaneous mV in the last window
     bool      saturated;        // peak_mv >= PUMP_FEEDBACK_SATURATION_MV
     int       threshold_mv;     // active on/off decision threshold
-    // Water pressure transducer (ADC1_CH4).
+    // Water pressure transducer.
+    bool      pressure_valid;   // false: no successful ADC sample this window —
+                                // psi/voltage below are 0 and must not be trusted
     float     pressure_v;       // 1-second average voltage at the transducer
-    int       pressure_mv;      // same, in mV
+    int       pressure_mv;      // same, in mV (raw at the ADC pin, post-divider)
     float     pressure_psi;     // derived pressure (clamped >= 0)
+    // True when the firmware's failsafe (broker-loss dead-man / runtime cap)
+    // turned the pump off. Cleared by the next real commanded change, so the
+    // cloud can tell a failsafe trip from a normal off.
+    bool      failsafe_off;
     int       output_gpio;      // control output pin
     int       feedback_gpio;    // sense input pin
     int       pressure_gpio;    // pressure transducer pin
@@ -45,6 +51,11 @@ bool      pump_is_on(void);
 // True if the controller currently believes the relay/feedback don't agree
 // (i.e. r.mismatch). Cheap helper for the LED fault indicator.
 bool      pump_has_fault(void);
+
+// Mark the current OFF state as caused by a safety failsafe (call right after
+// pump_set(false)). Surfaces as `failsafe_off` in the reading until the next
+// real commanded change.
+void      pump_note_failsafe_off(void);
 
 // Feedback decision threshold (mV) — persisted in NVS.
 int       pump_get_threshold_mv(void);

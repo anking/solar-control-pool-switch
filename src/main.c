@@ -117,6 +117,7 @@ static void status_broadcaster_task(void *arg)
                     ESP_LOGW(TAG, "FAILSAFE: broker unreachable for %ds while running — pump OFF",
                              PUMP_FAILSAFE_MQTT_TIMEOUT_S);
                     pump_set(false);
+                    pump_note_failsafe_off();   // so the cloud can tell this from a normal off
                     mqtt_down_since_ms = 0;
                     pump_get(&r);   // refresh so the publish below reflects OFF
                 }
@@ -133,6 +134,7 @@ static void status_broadcaster_task(void *arg)
             if (on_ms >= (int64_t)PUMP_MAX_RUNTIME_S * 1000) {
                 ESP_LOGW(TAG, "FAILSAFE: max runtime %ds reached — pump OFF", PUMP_MAX_RUNTIME_S);
                 pump_set(false);
+                pump_note_failsafe_off();
                 pump_get(&r);
             }
         }
@@ -142,7 +144,8 @@ static void status_broadcaster_task(void *arg)
             "{\"valid\":%s,\"commanded_on\":%s,\"feedback_on\":%s,\"mismatch\":%s,"
             "\"feedback_v\":%.3f,\"feedback_mv\":%d,\"raw_mv\":%d,\"peak_mv\":%d,"
             "\"saturated\":%s,\"threshold_mv\":%d,"
-            "\"pressure_psi\":%.1f,\"pressure_v\":%.3f,\"pressure_gpio\":%d,"
+            "\"pressure_psi\":%.1f,\"pressure_v\":%.3f,\"pressure_valid\":%s,\"pressure_gpio\":%d,"
+            "\"failsafe_off\":%s,"
             "\"output_gpio\":%d,\"feedback_gpio\":%d,"
             "\"on_seconds\":%lu,\"samples\":%lu}",
             r.valid ? "true" : "false",
@@ -152,7 +155,8 @@ static void status_broadcaster_task(void *arg)
             r.feedback_v, r.feedback_mv, r.raw_mv, r.peak_mv,
             r.saturated ? "true" : "false",
             r.threshold_mv,
-            r.pressure_psi, r.pressure_v, r.pressure_gpio,
+            r.pressure_psi, r.pressure_v, r.pressure_valid ? "true" : "false", r.pressure_gpio,
+            r.failsafe_off ? "true" : "false",
             r.output_gpio, r.feedback_gpio,
             (unsigned long)r.on_seconds,
             (unsigned long)r.sample_count);
