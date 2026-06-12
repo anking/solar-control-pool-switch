@@ -9,6 +9,8 @@
 
 esp_err_t mqtt_bridge_init(void);
 bool mqtt_bridge_is_connected(void);
+// True once a broker host has been configured (vs. local-only operation).
+bool mqtt_bridge_is_configured(void);
 
 // Publish the current pump state to pumps/{mac}/state (retained, QoS 1 — so a
 // late MQTT subscriber always sees the latest commanded/feedback/fault state).

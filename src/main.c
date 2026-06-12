@@ -92,12 +92,51 @@ static void status_broadcaster_task(void *arg)
     bool    last_mismatch  = false;
     float   last_pressure  = 0.0f;
     int64_t last_pub_ms    = esp_timer_get_time() / 1000;
+    int64_t mqtt_down_since_ms = 0;   // 0 = broker currently reachable
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(1000));
 
         pump_reading_t r;
         pump_get(&r);
+
+        // ---- Safety failsafes (only meaningful while the pump is running) ----
+        int64_t fs_now_ms = esp_timer_get_time() / 1000;
+
+        // 1. Dead-man's switch: broker unreachable for too long → turn OFF, so a
+        //    lost internet/broker connection can't leave the pump running
+        //    indefinitely. Gated on a broker being configured (local-only use is
+        //    unaffected). When connectivity returns the cloud schedule re-asserts.
+#if PUMP_FAILSAFE_MQTT_TIMEOUT_S > 0
+        if (r.valid && r.commanded_on && mqtt_bridge_is_configured()) {
+            if (mqtt_bridge_is_connected()) {
+                mqtt_down_since_ms = 0;
+            } else {
+                if (mqtt_down_since_ms == 0) mqtt_down_since_ms = fs_now_ms;
+                else if (fs_now_ms - mqtt_down_since_ms >= (int64_t)PUMP_FAILSAFE_MQTT_TIMEOUT_S * 1000) {
+                    ESP_LOGW(TAG, "FAILSAFE: broker unreachable for %ds while running — pump OFF",
+                             PUMP_FAILSAFE_MQTT_TIMEOUT_S);
+                    pump_set(false);
+                    mqtt_down_since_ms = 0;
+                    pump_get(&r);   // refresh so the publish below reflects OFF
+                }
+            }
+        } else {
+            mqtt_down_since_ms = 0;
+        }
+#endif
+
+        // 2. Hard runtime cap: OFF after N seconds of continuous running.
+#if PUMP_MAX_RUNTIME_S > 0
+        if (r.valid && r.commanded_on) {
+            int64_t on_ms = (esp_timer_get_time() - r.last_change_us) / 1000;
+            if (on_ms >= (int64_t)PUMP_MAX_RUNTIME_S * 1000) {
+                ESP_LOGW(TAG, "FAILSAFE: max runtime %ds reached — pump OFF", PUMP_MAX_RUNTIME_S);
+                pump_set(false);
+                pump_get(&r);
+            }
+        }
+#endif
 
         int len = snprintf(buf, sizeof(buf),
             "{\"valid\":%s,\"commanded_on\":%s,\"feedback_on\":%s,\"mismatch\":%s,"

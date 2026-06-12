@@ -178,6 +178,11 @@ bool mqtt_bridge_is_connected(void)
     return s_connected;
 }
 
+bool mqtt_bridge_is_configured(void)
+{
+    return s_host[0] != '\0';
+}
+
 void mqtt_bridge_publish_info(void)
 {
     if (!s_connected || !s_client) return;

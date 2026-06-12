@@ -113,6 +113,23 @@
 // stays off until an explicit command turns it on.
 
 // =============================================================================
+// SAFETY FAILSAFE
+// =============================================================================
+// Dead-man's switch. If the pump is running but the device can't reach the MQTT
+// broker (its source of remote control / schedule) for this long, turn the pump
+// OFF — so an internet/broker outage can't leave it running unattended
+// indefinitely. Only applies when a broker is configured (pure local-only
+// operation is unaffected). Set to 0 to disable. When connectivity returns the
+// cloud schedule re-commands ON within a tick if it should still be running.
+#define PUMP_FAILSAFE_MQTT_TIMEOUT_S    1800   // 30 minutes (0 = disabled)
+
+// Hard ceiling: turn the pump OFF after this many seconds of CONTINUOUS running,
+// regardless of connectivity — defense-in-depth against a stuck-on command or a
+// schedule that never sends "off". Set to 0 to disable (pool runs can be long,
+// so it's off by default; set e.g. 43200 for a 12 h cap).
+#define PUMP_MAX_RUNTIME_S              0      // 0 = disabled
+
+// =============================================================================
 // REPORTING
 // =============================================================================
 // The dashboard gets a 1 Hz live push over the WebSocket. MQTT is report-by-

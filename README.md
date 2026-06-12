@@ -164,6 +164,30 @@ window, `mismatch` goes true: the dashboard shows a red banner, MQTT publishes
 the change immediately, and the onboard LED triple-blinks (in the default
 "errors only" LED mode).
 
+## Safety: the pump can't run unattended forever
+
+Layered protections ensure a connectivity loss can't leave the pump running
+indefinitely:
+
+1. **Broker dead-man's switch** (`PUMP_FAILSAFE_MQTT_TIMEOUT_S`, default 30 min).
+   If the pump is running but the device can't reach the MQTT broker — its
+   source of remote control and the schedule — for this long, the firmware turns
+   the pump **OFF**. This covers the case the reboots below miss: local WiFi up
+   but the internet/broker down, so the schedule's "off" never arrives. Only
+   active when a broker is configured (pure local-only use is unaffected). When
+   connectivity returns, the cloud schedule re-commands ON within a tick if it
+   should still be running. Set to 0 to disable.
+2. **Optional hard runtime cap** (`PUMP_MAX_RUNTIME_S`, default 0 = off). Turns
+   the pump OFF after N seconds of *continuous* running regardless of
+   connectivity — defense-in-depth against a stuck-on command. Off by default
+   because legitimate pool runs can be long; set e.g. `43200` for a 12 h cap.
+3. **WiFi watchdog reboot** (~10 min). If the STA link is fully down for >10 min
+   the device reboots — and since it always boots OFF, the pump stops.
+4. **Daily reboot** (≤24 h). The once-a-day reboot is a final backstop: even with
+   no other trigger, the pump can't run more than ~24 h before it cycles OFF.
+
+All tunables live in [src/config.h](src/config.h).
+
 ## Project layout
 
 ```
