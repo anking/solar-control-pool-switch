@@ -333,6 +333,11 @@ esp_err_t mqtt_bridge_clear_config(void)
 void mqtt_bridge_get_status(mqtt_status_t *out)
 {
     if (!out) return;
+    // Zero first so every field is null-terminated even from an uninitialized
+    // caller struct: strncpy doesn't terminate when the source exactly fills the
+    // buffer (the 17-char MAC in an 18-byte field), which could drag stack
+    // garbage / control chars into the /api/mqtt JSON and break its parse.
+    memset(out, 0, sizeof(*out));
     out->configured = (s_host[0] != '\0');
     out->connected = s_connected;
     strncpy(out->host, s_host, sizeof(out->host) - 1);
