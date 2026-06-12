@@ -19,8 +19,13 @@ typedef struct {
     int       peak_mv;          // peak instantaneous mV in the last window
     bool      saturated;        // peak_mv >= PUMP_FEEDBACK_SATURATION_MV
     int       threshold_mv;     // active on/off decision threshold
+    // Water pressure transducer (ADC1_CH4).
+    float     pressure_v;       // 1-second average voltage at the transducer
+    int       pressure_mv;      // same, in mV
+    float     pressure_psi;     // derived pressure (clamped >= 0)
     int       output_gpio;      // control output pin
     int       feedback_gpio;    // sense input pin
+    int       pressure_gpio;    // pressure transducer pin
     uint32_t  on_seconds;       // cumulative seconds the pump has been ON since boot
     uint32_t  sample_count;     // total ADC samples taken since boot
     int64_t   last_sample_us;

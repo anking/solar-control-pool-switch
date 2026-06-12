@@ -68,6 +68,46 @@
 // is treated as a real fault. Covers relay pull-in time and ADC settling.
 #define PUMP_SETTLE_MS                  2000
 
+// =============================================================================
+// WATER PRESSURE (analog transducer via voltage divider)
+// =============================================================================
+//   PRESSURE (GPIO 0 / ADC1_CH0): a ratiometric pressure transducer (0.5 V at
+//                     0 psi rising to 4.5 V at full scale) read through a
+//                     resistor divider that scales it under the 3.3 V ADC limit.
+//
+//   Only ADC1 (GPIO 0-4) works while WiFi is on — ADC2/GPIO 5 conflicts with
+//   WiFi, and GPIO 6-10/20/21 aren't ADC at all. GPIO 2 is a strapping pin.
+//   That leaves GPIO 0/1/4 as the usable analog inputs; feedback uses GPIO 3.
+//   GPIO 0 is non-strapping and free (no RTC crystal on the SuperMini).
+//
+//   Divider: transducer ── R_top ──┬── R_series(1k) ── GPIO 0
+//                                   └── R_bottom ── GND
+//   With 10k top / 20k bottom the ADC sees 2/3 of the transducer voltage
+//   (4.5 V -> 3.0 V, safely under the cap). The 1k series resistor forms a
+//   small RC filter / pin protection and does not change the ratio (the ADC
+//   input is high-impedance). The firmware multiplies the measured voltage by
+//   (R_top + R_bottom) / R_bottom to recover the true transducer voltage.
+#define PRESSURE_ADC_UNIT       ADC_UNIT_1
+#define PRESSURE_ADC_CHANNEL    ADC_CHANNEL_0
+#define PRESSURE_GPIO           0
+
+// Divider resistor values — set these to match your wiring.
+#define PRESSURE_DIV_R_TOP_OHMS     10000   // transducer -> ADC tap
+#define PRESSURE_DIV_R_BOTTOM_OHMS  20000   // ADC tap -> GND
+#define PRESSURE_DIVIDER_MULT \
+    (((float)PRESSURE_DIV_R_TOP_OHMS + (float)PRESSURE_DIV_R_BOTTOM_OHMS) / (float)PRESSURE_DIV_R_BOTTOM_OHMS)
+
+// Transducer transfer function (on the RECOVERED, pre-divider voltage):
+// psi = (V - V_MIN) / (V_MAX - V_MIN) * PSI_MAX, clamped at 0.
+#define PRESSURE_V_MIN_MV       500     // transducer output at 0 psi (mV)
+#define PRESSURE_V_MAX_MV       4500    // transducer output at full scale (mV)
+#define PRESSURE_PSI_MAX        80.0f   // psi at full scale
+
+// MQTT report-by-exception: also flush when pressure moves at least this much
+// (psi) since the last publish, so the cloud sees meaningful changes promptly
+// without streaming every 1 Hz reading.
+#define REPORT_PRESSURE_DELTA_PSI   2.0f
+
 // Safety: the pump ALWAYS boots OFF. The commanded state is never persisted,
 // so a power loss, reboot, or OTA can never silently re-energise the pump — it
 // stays off until an explicit command turns it on.

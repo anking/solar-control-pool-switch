@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -89,6 +90,7 @@ static void status_broadcaster_task(void *arg)
     bool    last_commanded = false;
     bool    last_feedback  = false;
     bool    last_mismatch  = false;
+    float   last_pressure  = 0.0f;
     int64_t last_pub_ms    = esp_timer_get_time() / 1000;
 
     while (1) {
@@ -101,6 +103,7 @@ static void status_broadcaster_task(void *arg)
             "{\"valid\":%s,\"commanded_on\":%s,\"feedback_on\":%s,\"mismatch\":%s,"
             "\"feedback_v\":%.3f,\"feedback_mv\":%d,\"raw_mv\":%d,\"peak_mv\":%d,"
             "\"saturated\":%s,\"threshold_mv\":%d,"
+            "\"pressure_psi\":%.1f,\"pressure_v\":%.3f,\"pressure_gpio\":%d,"
             "\"output_gpio\":%d,\"feedback_gpio\":%d,"
             "\"on_seconds\":%lu,\"samples\":%lu}",
             r.valid ? "true" : "false",
@@ -110,6 +113,7 @@ static void status_broadcaster_task(void *arg)
             r.feedback_v, r.feedback_mv, r.raw_mv, r.peak_mv,
             r.saturated ? "true" : "false",
             r.threshold_mv,
+            r.pressure_psi, r.pressure_v, r.pressure_gpio,
             r.output_gpio, r.feedback_gpio,
             (unsigned long)r.on_seconds,
             (unsigned long)r.sample_count);
@@ -125,14 +129,17 @@ static void status_broadcaster_task(void *arg)
         bool    changed   = have_sent && (r.commanded_on != last_commanded ||
                                           r.feedback_on  != last_feedback  ||
                                           r.mismatch     != last_mismatch);
+        bool    pressure_moved = have_sent &&
+            fabsf(r.pressure_psi - last_pressure) >= REPORT_PRESSURE_DELTA_PSI;
         bool    heartbeat = (now_ms - last_pub_ms) >= (REPORT_HEARTBEAT_SECONDS * 1000);
 
-        if (first || changed || heartbeat) {
+        if (first || changed || pressure_moved || heartbeat) {
             mqtt_bridge_publish_state(&r);
             have_sent      = true;
             last_commanded = r.commanded_on;
             last_feedback  = r.feedback_on;
             last_mismatch  = r.mismatch;
+            last_pressure  = r.pressure_psi;
             last_pub_ms    = now_ms;
         }
     }

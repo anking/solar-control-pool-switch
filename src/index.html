@@ -105,9 +105,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-seri
         <div class="pump-cell-label">Feedback</div>
         <div class="pump-cell-value" id="cell-feedback">--</div>
       </div>
-      <div class="pump-cell">
-        <div class="pump-cell-label">Sense voltage</div>
-        <div class="pump-cell-value"><span id="cell-volts">--</span><span class="pump-cell-unit">V</span></div>
+      <div class="pump-cell" title="Water pressure transducer">
+        <div class="pump-cell-label">Pressure</div>
+        <div class="pump-cell-value"><span id="cell-psi">--</span><span class="pump-cell-unit">psi</span></div>
       </div>
     </div>
     <div id="mismatch-warn" style="display:none;margin-top:14px;padding:8px;border-radius:6px;background:rgba(239,68,68,.15);border:1px solid var(--red);font-size:12px;color:var(--red);text-align:left">
@@ -138,6 +138,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-seri
     <div class="metric"><span class="metric-label">Last sample (mV)</span><span class="metric-value" id="diag-rawmv">--</span></div>
     <div class="metric"><span class="metric-label">Peak in window (mV)</span><span class="metric-value" id="diag-peakmv">--</span></div>
     <div class="metric"><span class="metric-label">Active threshold</span><span class="metric-value"><span id="diag-threshold">--</span><span class="metric-unit">mV</span></span></div>
+    <div class="metric"><span class="metric-label">Water pressure</span><span class="metric-value" id="diag-pressure">--</span></div>
     <div class="metric"><span class="metric-label">Pump runtime (since boot)</span><span class="metric-value" id="diag-runtime">--</span></div>
     <div class="metric"><span class="metric-label">ADC samples since boot</span><span class="metric-value" id="diag-samples">--</span></div>
     <div class="metric"><span class="metric-label">Output GPIO</span><span class="metric-value" id="diag-out-gpio">--</span></div>
@@ -364,7 +365,7 @@ function applyStatus(s) {
   cf.textContent = s.feedback_on ? 'ON' : 'OFF';
   cf.className = 'pump-cell-value ' + (s.mismatch ? 'bad' : (s.feedback_on ? 'good' : ''));
 
-  $('cell-volts').textContent = s.feedback_v.toFixed(2);
+  $('cell-psi').textContent = (typeof s.pressure_psi === 'number') ? s.pressure_psi.toFixed(1) : '--';
   $('mismatch-warn').style.display = s.mismatch ? 'block' : 'none';
 
   // Diagnostics
@@ -372,6 +373,7 @@ function applyStatus(s) {
   $('diag-rawmv').textContent = s.raw_mv;
   $('diag-peakmv').textContent = s.peak_mv;
   $('diag-threshold').textContent = s.threshold_mv;
+  if (typeof s.pressure_psi === 'number') $('diag-pressure').textContent = s.pressure_psi.toFixed(1) + ' psi (' + s.pressure_v.toFixed(3) + ' V)';
   $('diag-runtime').textContent = fmtDuration(s.on_seconds);
   $('diag-samples').textContent = s.samples.toLocaleString();
   $('diag-out-gpio').textContent = 'GPIO ' + s.output_gpio;

@@ -18,6 +18,8 @@ wind sensor swapped for relay control + feedback sensing.
 | Teyleten Robot ESP32-C3 SuperMini     | Native USB-C, 4 MB flash, onboard LED on GPIO 8|
 | Relay / SSR module (3.3 V logic)      | Switches the pump's mains contactor             |
 | 10 K resistor                         | Series resistor on the feedback sense tap       |
+| Pressure transducer (0.5–4.5 V)       | Ratiometric, e.g. 0–80 psi water pressure       |
+| 10K / 20K / 1K resistors              | Voltage divider scaling the transducer to ADC   |
 
 ### Wiring
 
@@ -27,6 +29,12 @@ wind sensor swapped for relay control + feedback sensing.
         +--[ 10K ]--+---> GPIO 3   (ADC1_CH3, feedback sense)
                     |
                   (GND)            (optional pull-down to firm up the "off" level)
+
+   transducer ──[ 10K ]──┬──[ 1K ]──> GPIO 0   (ADC1_CH0, water pressure)
+                         |
+                      [ 20K ]
+                         |
+                       (GND)         (ADC sees 2/3 of the transducer voltage)
 ```
 
 - **Output — GPIO 10.** Driven **HIGH (3.3 V)** to enable the pump, **LOW (0 V)**
@@ -41,6 +49,15 @@ wind sensor swapped for relay control + feedback sensing.
   energised". Comparing that against the commanded state is what flags a fault.
   ADC1 only — ADC2 conflicts with WiFi on the C3. GPIO 3 is non-strapping;
   avoid GPIO 2 here (it's a strapping pin that must read HIGH at reset).
+- **Pressure — GPIO 0 (ADC1_CH0).** A ratiometric water-pressure transducer:
+  0.5 V at 0 psi rising to 4.5 V at full scale (default 80 psi), read through a
+  **10K / 20K** divider (+ 1K series filter) that scales it to 2/3 — so full
+  scale is ~3.0 V, safely under the C3's 3.3 V ADC limit. The firmware undoes
+  the divider (`× (R_top + R_bottom) / R_bottom`) to recover the transducer
+  voltage, then converts to psi (`psi = (V − 0.5) / 4.0 × 80`, clamped at 0).
+  Set the divider resistor values and transfer function in
+  [src/config.h](src/config.h). Only ADC1 (GPIO 0–4) works with WiFi on; GPIO 1
+  is a free non-strapping channel (feedback is on GPIO 3).
 
 Pin assignments and tunables live in [src/config.h](src/config.h).
 
@@ -112,8 +129,12 @@ heartbeat. Payload:
 ```json
 {"commanded_on":true,"feedback_on":true,"mismatch":false,
  "feedback_v":3.105,"feedback_mv":3105,"saturated":true,
- "threshold_mv":1600,"on_seconds":7200}
+ "threshold_mv":1600,"pressure_psi":18.4,"pressure_v":1.420,"on_seconds":7200}
 ```
+
+State is also flushed when the pressure moves by `REPORT_PRESSURE_DELTA_PSI`
+(2 psi) since the last publish, so meaningful pressure changes reach the cloud
+promptly without streaming every 1 Hz reading.
 
 **Commands** on `pumps/<mac>/cmd`:
 

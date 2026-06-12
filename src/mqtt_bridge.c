@@ -200,9 +200,9 @@ void mqtt_bridge_publish_info(void)
     char buf[384];
     int len = snprintf(buf, sizeof(buf),
         "{\"model\":\"esp32-c3-pool-switch\",\"firmware\":\"%s\","
-        "\"output_gpio\":%d,\"feedback_gpio\":%d,\"threshold_mv\":%d,"
+        "\"output_gpio\":%d,\"feedback_gpio\":%d,\"pressure_gpio\":%d,\"threshold_mv\":%d,"
         "\"ui_url\":\"http://%s/\",\"ui_host\":\"%s.local\"}",
-        fw, PUMP_OUTPUT_GPIO, PUMP_FEEDBACK_GPIO, pump_get_threshold_mv(),
+        fw, PUMP_OUTPUT_GPIO, PUMP_FEEDBACK_GPIO, PRESSURE_GPIO, pump_get_threshold_mv(),
         wifi.ip, wifi.hostname);
 
     int msg_id = esp_mqtt_client_publish(s_client, topic, buf, len, 1, 1);
@@ -224,13 +224,15 @@ void mqtt_bridge_publish_state(const pump_reading_t *r)
     int len = snprintf(buf, sizeof(buf),
         "{\"commanded_on\":%s,\"feedback_on\":%s,\"mismatch\":%s,"
         "\"feedback_v\":%.3f,\"feedback_mv\":%d,\"saturated\":%s,"
-        "\"threshold_mv\":%d,\"on_seconds\":%lu}",
+        "\"threshold_mv\":%d,\"pressure_psi\":%.1f,\"pressure_v\":%.3f,"
+        "\"on_seconds\":%lu}",
         r->commanded_on ? "true" : "false",
         r->feedback_on  ? "true" : "false",
         r->mismatch     ? "true" : "false",
         r->feedback_v, r->feedback_mv,
         r->saturated ? "true" : "false",
         r->threshold_mv,
+        r->pressure_psi, r->pressure_v,
         (unsigned long)r->on_seconds);
 
     // Retained QoS 1: the latest state is always available to a new subscriber.

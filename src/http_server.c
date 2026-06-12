@@ -139,6 +139,7 @@ static int build_status_json(char *buf, size_t size)
         "{\"valid\":%s,\"commanded_on\":%s,\"feedback_on\":%s,\"mismatch\":%s,"
         "\"feedback_v\":%.3f,\"feedback_mv\":%d,\"raw_mv\":%d,\"peak_mv\":%d,"
         "\"saturated\":%s,\"threshold_mv\":%d,"
+        "\"pressure_psi\":%.1f,\"pressure_v\":%.3f,\"pressure_gpio\":%d,"
         "\"output_gpio\":%d,\"feedback_gpio\":%d,"
         "\"on_seconds\":%lu,\"samples\":%lu}",
         r.valid ? "true" : "false",
@@ -148,6 +149,7 @@ static int build_status_json(char *buf, size_t size)
         r.feedback_v, r.feedback_mv, r.raw_mv, r.peak_mv,
         r.saturated ? "true" : "false",
         r.threshold_mv,
+        r.pressure_psi, r.pressure_v, r.pressure_gpio,
         r.output_gpio, r.feedback_gpio,
         (unsigned long)r.on_seconds,
         (unsigned long)r.sample_count);

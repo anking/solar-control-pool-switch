@@ -19,8 +19,10 @@ static const char *TAG = "pump";
 #define NVS_KEY_THRESHOLD  "fb_thresh_mv" // u16: feedback on/off threshold
 
 static adc_oneshot_unit_handle_t s_adc = NULL;
-static adc_cali_handle_t         s_cali = NULL;
-static bool                      s_cali_ok = false;
+static adc_cali_handle_t          s_cali = NULL;            // feedback channel
+static bool                       s_cali_ok = false;
+static adc_cali_handle_t          s_cali_pressure = NULL;   // pressure channel
+static bool                       s_cali_pressure_ok = false;
 
 static SemaphoreHandle_t s_mutex = NULL;
 static pump_reading_t    s_reading = {0};
@@ -45,11 +47,11 @@ static inline void drive_output(bool on)
 #endif
 }
 
-static inline int raw_to_mv(int raw)
+static inline int raw_to_mv(adc_cali_handle_t cali, bool cali_ok, int raw)
 {
     int mv = 0;
-    if (s_cali_ok) {
-        adc_cali_raw_to_voltage(s_cali, raw, &mv);
+    if (cali_ok) {
+        adc_cali_raw_to_voltage(cali, raw, &mv);
     } else {
         // Fallback: linear approximation if calibration scheme isn't available.
         // 12-bit ADC, DB_12 attenuation, ~3100 mV full-scale.
@@ -58,12 +60,29 @@ static inline int raw_to_mv(int raw)
     return mv;
 }
 
+// Recover the transducer voltage (mV) from the divided ADC voltage.
+static inline float pressure_source_mv(int adc_mv)
+{
+    return adc_mv * PRESSURE_DIVIDER_MULT;
+}
+
+// Convert an averaged ADC voltage (mV, divided) to psi: undo the divider, then
+// apply the transfer function, clamped at 0.
+static inline float pressure_mv_to_psi(int adc_mv)
+{
+    float src_mv = pressure_source_mv(adc_mv);
+    float psi = (src_mv - (float)PRESSURE_V_MIN_MV) /
+                (float)(PRESSURE_V_MAX_MV - PRESSURE_V_MIN_MV) * PRESSURE_PSI_MAX;
+    return psi < 0.0f ? 0.0f : psi;
+}
+
 static void sampler_task(void *arg)
 {
     const TickType_t sample_period = pdMS_TO_TICKS(1000 / PUMP_FEEDBACK_OVERSAMPLE_HZ);
     const int        samples_per_s = PUMP_FEEDBACK_OVERSAMPLE_HZ;
     int    in_window = 0;
     int    sum_mv = 0;
+    int    sum_pmv = 0;
     int    peak_mv = 0;
     TickType_t last = xTaskGetTickCount();
 
@@ -73,18 +92,28 @@ static void sampler_task(void *arg)
         int raw = 0;
         esp_err_t err = adc_oneshot_read(s_adc, PUMP_FEEDBACK_ADC_CHANNEL, &raw);
         if (err != ESP_OK) continue;
-        int mv = raw_to_mv(raw);
+        int mv = raw_to_mv(s_cali, s_cali_ok, raw);
         s_sample_count++;
 
+        // Pressure transducer on the second ADC1 channel (same unit).
+        int praw = 0;
+        int pmv = 0;
+        if (adc_oneshot_read(s_adc, PRESSURE_ADC_CHANNEL, &praw) == ESP_OK) {
+            pmv = raw_to_mv(s_cali_pressure, s_cali_pressure_ok, praw);
+        }
+
         sum_mv += mv;
+        sum_pmv += pmv;
         if (mv > peak_mv) peak_mv = mv;
         in_window++;
 
         if (in_window >= samples_per_s) {
             int avg_mv = sum_mv / in_window;
+            int avg_pmv = sum_pmv / in_window;
             int captured_peak = peak_mv;
             in_window = 0;
             sum_mv = 0;
+            sum_pmv = 0;
             peak_mv = 0;
 
             int64_t now_us = esp_timer_get_time();
@@ -122,8 +151,14 @@ static void sampler_task(void *arg)
             s_reading.peak_mv        = captured_peak;
             s_reading.saturated      = captured_peak >= PUMP_FEEDBACK_SATURATION_MV;
             s_reading.threshold_mv   = threshold;
+            // pressure_v is the recovered transducer voltage (0.5-4.5 V range);
+            // pressure_mv stays the raw mV at the ADC pin for diagnostics.
+            s_reading.pressure_v     = pressure_source_mv(avg_pmv) / 1000.0f;
+            s_reading.pressure_mv    = avg_pmv;
+            s_reading.pressure_psi   = pressure_mv_to_psi(avg_pmv);
             s_reading.output_gpio    = PUMP_OUTPUT_GPIO;
             s_reading.feedback_gpio  = PUMP_FEEDBACK_GPIO;
+            s_reading.pressure_gpio  = PRESSURE_GPIO;
             s_reading.on_seconds     = s_on_seconds;
             s_reading.sample_count   = s_sample_count;
             s_reading.last_sample_us = now_us;
@@ -180,8 +215,14 @@ esp_err_t pump_init(void)
         ESP_LOGE(TAG, "adc_oneshot_config_channel failed: %s", esp_err_to_name(err));
         return err;
     }
+    // Pressure transducer channel on the same unit (non-fatal if it fails —
+    // the pump still controls; pressure just reads 0).
+    err = adc_oneshot_config_channel(s_adc, PRESSURE_ADC_CHANNEL, &chan_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Pressure ADC channel config failed: %s", esp_err_to_name(err));
+    }
 
-    // Curve-fitting calibration (supported on ESP32-C3).
+    // Curve-fitting calibration (supported on ESP32-C3) — one handle per channel.
 #if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
     adc_cali_curve_fitting_config_t cali_cfg = {
         .unit_id  = PUMP_FEEDBACK_ADC_UNIT,
@@ -195,15 +236,26 @@ esp_err_t pump_init(void)
     } else {
         ESP_LOGW(TAG, "ADC calibration unavailable, using linear approximation");
     }
+
+    adc_cali_curve_fitting_config_t pcali_cfg = {
+        .unit_id  = PRESSURE_ADC_UNIT,
+        .chan     = PRESSURE_ADC_CHANNEL,
+        .atten    = ADC_ATTEN_DB_12,
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+    };
+    if (adc_cali_create_scheme_curve_fitting(&pcali_cfg, &s_cali_pressure) == ESP_OK) {
+        s_cali_pressure_ok = true;
+    }
 #else
     ESP_LOGW(TAG, "ADC curve-fitting not compiled in, using linear approximation");
 #endif
 
     xTaskCreate(sampler_task, "pump_smp", 4096, NULL, 5, NULL);
 
-    ESP_LOGI(TAG, "Pump ready (boots OFF) — output GPIO%d (%s=on), feedback GPIO%d (ADC1 ch%d, on>=%dmV)",
+    ESP_LOGI(TAG, "Pump ready (boots OFF) — output GPIO%d (%s=on), feedback GPIO%d (ch%d), pressure GPIO%d (ch%d)",
              PUMP_OUTPUT_GPIO, PUMP_OUTPUT_ACTIVE_LOW ? "LOW" : "HIGH",
-             PUMP_FEEDBACK_GPIO, (int)PUMP_FEEDBACK_ADC_CHANNEL, s_threshold_mv);
+             PUMP_FEEDBACK_GPIO, (int)PUMP_FEEDBACK_ADC_CHANNEL,
+             PRESSURE_GPIO, (int)PRESSURE_ADC_CHANNEL);
     return ESP_OK;
 }
 
