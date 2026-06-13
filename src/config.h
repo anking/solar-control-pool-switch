@@ -129,6 +129,33 @@
 // so it's off by default; set e.g. 43200 for a 12 h cap).
 #define PUMP_MAX_RUNTIME_S              0      // 0 = disabled
 
+// ---- Pressure failsafes -----------------------------------------------------
+// The device is the authority for pressure safety: it detects, trips, and
+// latches a lockout locally (works fully offline), refusing to restart until a
+// manual reset. The cloud mirrors the reported lockout for email + UI. Three
+// rules, only while the pump is running:
+//   LOW      — doesn't reach min psi within the grace window of starting
+//              (loss of prime / dry run)            → lockout
+//   HIGH     — at/above critical psi held past the sustain window
+//              (blockage / closed valve)            → lockout
+//   WARNING  — above max psi past the warn window   → warning flag only
+//
+// Default thresholds (psi). The CLOUD is the source of truth and pushes these
+// down over MQTT (persisted in NVS); these are the boot defaults until it does.
+// They match the cloud / frontend PRESSURE_BANDS so both agree out of the box.
+#define PUMP_PRESSURE_MIN_PSI_DEFAULT       5.0f
+#define PUMP_PRESSURE_MAX_PSI_DEFAULT       25.0f
+#define PUMP_PRESSURE_CRITICAL_PSI_DEFAULT  30.0f
+
+// Pressure thresholds are clamped to this range (psi) wherever they're set.
+#define PUMP_PRESSURE_PSI_FLOOR        0.0f
+#define PUMP_PRESSURE_PSI_CEIL         100.0f
+
+// Timing windows (seconds). Fixed, not field-configurable.
+#define PUMP_LOW_PRESSURE_GRACE_S      15   // reach min within this of starting
+#define PUMP_HIGH_PRESSURE_SUSTAIN_S   3    // critical held this long → trip
+#define PUMP_PRESSURE_WARN_SUSTAIN_S   60   // above max this long → warn
+
 // =============================================================================
 // REPORTING
 // =============================================================================

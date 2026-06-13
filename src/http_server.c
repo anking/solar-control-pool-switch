@@ -141,6 +141,8 @@ static int build_status_json(char *buf, size_t size)
         "\"saturated\":%s,\"threshold_mv\":%d,"
         "\"pressure_psi\":%.1f,\"pressure_v\":%.3f,\"pressure_valid\":%s,\"pressure_gpio\":%d,"
         "\"failsafe_off\":%s,"
+        "\"safety_lockout\":%s,\"safety_reason\":\"%s\",\"pressure_warning\":%s,"
+        "\"min_psi\":%.1f,\"max_psi\":%.1f,\"critical_psi\":%.1f,"
         "\"output_gpio\":%d,\"feedback_gpio\":%d,"
         "\"on_seconds\":%lu,\"samples\":%lu}",
         r.valid ? "true" : "false",
@@ -152,6 +154,10 @@ static int build_status_json(char *buf, size_t size)
         r.threshold_mv,
         r.pressure_psi, r.pressure_v, r.pressure_valid ? "true" : "false", r.pressure_gpio,
         r.failsafe_off ? "true" : "false",
+        r.safety_lockout ? "true" : "false",
+        pump_safety_reason_str(r.safety_reason),
+        r.pressure_warning ? "true" : "false",
+        r.min_psi, r.max_psi, r.critical_psi,
         r.output_gpio, r.feedback_gpio,
         (unsigned long)r.on_seconds,
         (unsigned long)r.sample_count);
@@ -308,7 +314,7 @@ static esp_err_t system_info_handler(httpd_req_t *req)
 
 static esp_err_t api_status_handler(httpd_req_t *req)
 {
-    char buf[512];
+    char buf[640];
     build_status_json(buf, sizeof(buf));
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, buf);
@@ -322,12 +328,18 @@ static esp_err_t api_pump_post_handler(httpd_req_t *req)
 
     bool toggle = false;
     bool on;
-    if (json_extract_bool(body, "toggle", &toggle) && toggle) {
+    bool reset = false;
+    if (json_extract_bool(body, "reset_failsafe", &reset) && reset) {
+        // Clear a tripped safety lockout locally — works even with the cloud
+        // unreachable. (pump_set "on" is refused while locked out, so a reset
+        // is the only way back without a reboot, and a reboot keeps it latched.)
+        pump_reset_lockout();
+    } else if (json_extract_bool(body, "toggle", &toggle) && toggle) {
         pump_toggle();
     } else if (json_extract_bool(body, "on", &on)) {
         pump_set(on);
     } else {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Provide {\"on\":true|false} or {\"toggle\":true}");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Provide {\"on\":true|false}, {\"toggle\":true} or {\"reset_failsafe\":true}");
         return ESP_FAIL;
     }
 
@@ -336,7 +348,7 @@ static esp_err_t api_pump_post_handler(httpd_req_t *req)
     pump_get(&r);
     mqtt_bridge_publish_state(&r);
 
-    char buf[512];
+    char buf[640];
     build_status_json(buf, sizeof(buf));
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, buf);

@@ -119,22 +119,26 @@ Topic prefix is `pumps/<mac>/` (MAC with dashes, e.g. `pumps/a1-b2-c3-d4-e5-f6/`
 |---------------------------|-----|------------------------------------------------------------|
 | `pumps/<mac>/status`      | out | `{"online":true}` / `{"online":false}` (retained, LWT)     |
 | `pumps/<mac>/state`       | out | pump state (retained, QoS 1) — see below                   |
-| `pumps/<mac>/info`        | out | `{model, firmware, output_gpio, feedback_gpio, threshold_mv, ui_url, ui_host}` |
+| `pumps/<mac>/info`        | out | `{model, firmware, output_gpio, feedback_gpio, threshold_mv, min_psi, max_psi, critical_psi, ui_url, ui_host}` |
 | `pumps/<mac>/cmd`         | in  | commands (not retained) — see below                        |
 
 **State** is published report-by-exception: the moment any of `commanded_on`,
-`feedback_on`, or `mismatch` changes, plus a `REPORT_HEARTBEAT_SECONDS` (30 s)
-heartbeat. Payload:
+`feedback_on`, `mismatch`, `safety_lockout`, or `pressure_warning` changes, plus
+a `REPORT_HEARTBEAT_SECONDS` (30 s) heartbeat. Payload:
 
 ```json
 {"commanded_on":true,"feedback_on":true,"mismatch":false,
  "feedback_v":3.105,"feedback_mv":3105,"saturated":true,
- "threshold_mv":1600,"pressure_psi":18.4,"pressure_v":1.420,"on_seconds":7200}
+ "threshold_mv":1600,"pressure_psi":18.4,"pressure_v":1.420,"pressure_valid":true,
+ "failsafe_off":false,"safety_lockout":false,"safety_reason":"none",
+ "pressure_warning":false,"min_psi":5.0,"max_psi":25.0,"critical_psi":30.0,
+ "on_seconds":7200}
 ```
 
-State is also flushed when the pressure moves by `REPORT_PRESSURE_DELTA_PSI`
-(2 psi) since the last publish, so meaningful pressure changes reach the cloud
-promptly without streaming every 1 Hz reading.
+`safety_reason` is `"none"`, `"low_pressure"`, or `"high_pressure"`. State is
+also flushed when the pressure moves by `REPORT_PRESSURE_DELTA_PSI` (2 psi) since
+the last publish, so meaningful pressure changes reach the cloud promptly without
+streaming every 1 Hz reading.
 
 **Commands** on `pumps/<mac>/cmd`:
 
@@ -143,6 +147,8 @@ promptly without streaming every 1 Hz reading.
 {"pump": "off"}         // or {"pump": false} / {"pump": 0}
 {"toggle": true}        // flip the current state
 {"threshold_mv": 1600}  // change the feedback on/off threshold (100–3300)
+{"min_psi":5,"max_psi":25,"critical_psi":30}  // pressure failsafe thresholds (all 3 required)
+{"reset_failsafe": true}                       // clear a tripped pressure lockout
 ```
 
 Commands should be published **non-retained** so the pump stays OFF after a
@@ -163,6 +169,29 @@ relay pull-in) before judging the feedback. If commanded ≠ measured past that
 window, `mismatch` goes true: the dashboard shows a red banner, MQTT publishes
 the change immediately, and the onboard LED triple-blinks (in the default
 "errors only" LED mode).
+
+## Pressure failsafes
+
+The device is the **authority** for pressure safety — it detects, trips, and
+latches a lockout locally, so protection works even with the cloud unreachable.
+Evaluated once a second while the pump is running (thresholds are psi; the cloud
+is the source of truth and pushes them down, defaulting to 5 / 25 / 30):
+
+1. **Low pressure** — if the pump doesn't reach `min_psi` within **15 s** of
+   starting, it's almost certainly lost prime / running dry. The firmware
+   switches the pump **OFF** and latches a lockout.
+2. **High pressure** — if pressure holds at or above `critical_psi` for more than
+   **3 s** (a blockage or closed valve), it switches **OFF** and latches a lockout.
+3. **High-pressure warning** — if pressure stays above `max_psi` for over **1 min**
+   the firmware raises `pressure_warning` (no lockout); the cloud emails so you
+   can backwash a loading filter.
+
+A **lockout latches and persists in NVS** — a tripped safety stays tripped across
+a reboot (the pump boots OFF regardless), and every "on" path (manual, MQTT, and
+the cloud schedule) is refused until it's reset. Reset with `{"reset_failsafe":true}`
+over MQTT, the app's **Reset failsafe** button, or `POST /api/pump
+{"reset_failsafe":true}` on the device itself. The cloud mirrors the reported
+lockout to lock its UI and email the user; it does no independent detection.
 
 ## Safety: the pump can't run unattended forever
 

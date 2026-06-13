@@ -85,14 +85,22 @@ static void daily_reboot_task(void *arg)
 //     periodic heartbeat so the backend knows we're still alive.
 static void status_broadcaster_task(void *arg)
 {
-    static char buf[512];
+    static char buf[640];
     bool    have_sent      = false;
     bool    last_commanded = false;
     bool    last_feedback  = false;
     bool    last_mismatch  = false;
+    bool    last_lockout   = false;
+    bool    last_warning   = false;
     float   last_pressure  = 0.0f;
     int64_t last_pub_ms    = esp_timer_get_time() / 1000;
     int64_t mqtt_down_since_ms = 0;   // 0 = broker currently reachable
+
+    // Pressure-failsafe per-run state (see the failsafe block below).
+    bool    fs_was_on        = false;
+    bool    fs_reached_min   = false;
+    int64_t fs_high_since_ms = 0;
+    int64_t fs_warn_since_ms = 0;
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -140,6 +148,69 @@ static void status_broadcaster_task(void *arg)
         }
 #endif
 
+        // 3. Pressure failsafes (the device is the authority). Only while
+        //    running with a trustworthy reading and not already locked out. A
+        //    LOW or HIGH trip switches the pump off and latches a persisted
+        //    lockout — it can't restart (manual / MQTT / schedule) until reset.
+        //    A WARNING just sets a flag the cloud emails on. The cloud mirrors
+        //    these reported states; it does no independent detection.
+        if (r.valid && r.commanded_on && r.pressure_valid && !r.safety_lockout) {
+            if (!fs_was_on) {   // pump just started — arm a fresh run
+                fs_reached_min = false;
+                fs_high_since_ms = 0;
+                fs_warn_since_ms = 0;
+            }
+            int64_t on_ms = (esp_timer_get_time() - r.last_change_us) / 1000;
+
+            // LOW: must clear min psi within the grace window of starting.
+            if (!fs_reached_min) {
+                if (r.pressure_psi >= r.min_psi) {
+                    fs_reached_min = true;
+                } else if (on_ms >= (int64_t)PUMP_LOW_PRESSURE_GRACE_S * 1000) {
+                    ESP_LOGW(TAG, "FAILSAFE: low pressure %.1f < %.1f psi %ds after start — LOCKOUT",
+                             r.pressure_psi, r.min_psi, PUMP_LOW_PRESSURE_GRACE_S);
+                    pump_set(false);
+                    pump_trip_lockout(PUMP_SAFETY_LOW_PRESSURE);
+                    pump_get(&r);
+                }
+            }
+
+            // HIGH: at/above critical psi held past the sustain window.
+            if (!r.safety_lockout && r.pressure_psi >= r.critical_psi) {
+                if (fs_high_since_ms == 0) fs_high_since_ms = fs_now_ms;
+                else if (fs_now_ms - fs_high_since_ms >= (int64_t)PUMP_HIGH_PRESSURE_SUSTAIN_S * 1000) {
+                    ESP_LOGW(TAG, "FAILSAFE: high pressure %.1f >= %.1f psi sustained %ds — LOCKOUT",
+                             r.pressure_psi, r.critical_psi, PUMP_HIGH_PRESSURE_SUSTAIN_S);
+                    pump_set(false);
+                    pump_trip_lockout(PUMP_SAFETY_HIGH_PRESSURE);
+                    pump_get(&r);
+                }
+            } else {
+                fs_high_since_ms = 0;
+            }
+
+            // WARNING: above max psi held past the warn window → flag only.
+            if (!r.safety_lockout && r.pressure_psi > r.max_psi) {
+                if (fs_warn_since_ms == 0) fs_warn_since_ms = fs_now_ms;
+                else if (fs_now_ms - fs_warn_since_ms >= (int64_t)PUMP_PRESSURE_WARN_SUSTAIN_S * 1000) {
+                    pump_set_pressure_warning(true);
+                }
+            } else {
+                fs_warn_since_ms = 0;
+                if (r.pressure_warning) pump_set_pressure_warning(false);
+            }
+
+            fs_was_on = true;
+        } else {
+            // Off (or already locked out) — clear the per-run timers, and drop a
+            // stale warning flag once the pump is no longer running.
+            fs_was_on = false;
+            fs_reached_min = false;
+            fs_high_since_ms = 0;
+            fs_warn_since_ms = 0;
+            if (!r.commanded_on && r.pressure_warning) pump_set_pressure_warning(false);
+        }
+
         int len = snprintf(buf, sizeof(buf),
             "{\"valid\":%s,\"commanded_on\":%s,\"feedback_on\":%s,\"mismatch\":%s,"
             "\"feedback_v\":%.3f,\"feedback_mv\":%d,\"raw_mv\":%d,\"peak_mv\":%d,"
@@ -169,9 +240,11 @@ static void status_broadcaster_task(void *arg)
 
         int64_t now_ms    = esp_timer_get_time() / 1000;
         bool    first     = !have_sent;
-        bool    changed   = have_sent && (r.commanded_on != last_commanded ||
-                                          r.feedback_on  != last_feedback  ||
-                                          r.mismatch     != last_mismatch);
+        bool    changed   = have_sent && (r.commanded_on   != last_commanded ||
+                                          r.feedback_on    != last_feedback  ||
+                                          r.mismatch       != last_mismatch  ||
+                                          r.safety_lockout != last_lockout   ||
+                                          r.pressure_warning != last_warning);
         bool    pressure_moved = have_sent &&
             fabsf(r.pressure_psi - last_pressure) >= REPORT_PRESSURE_DELTA_PSI;
         bool    heartbeat = (now_ms - last_pub_ms) >= (REPORT_HEARTBEAT_SECONDS * 1000);
@@ -182,6 +255,8 @@ static void status_broadcaster_task(void *arg)
             last_commanded = r.commanded_on;
             last_feedback  = r.feedback_on;
             last_mismatch  = r.mismatch;
+            last_lockout   = r.safety_lockout;
+            last_warning   = r.pressure_warning;
             last_pressure  = r.pressure_psi;
             last_pub_ms    = now_ms;
         }

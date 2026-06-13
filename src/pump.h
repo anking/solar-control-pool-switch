@@ -5,6 +5,15 @@
 #include <stdint.h>
 #include "esp_err.h"
 
+// Why the safety lockout tripped. Reported (as a string) in MQTT state so the
+// cloud can word its alert email; persisted in NVS so the lockout survives a
+// reboot (a tripped safety stays tripped until a manual reset).
+typedef enum {
+    PUMP_SAFETY_OK = 0,
+    PUMP_SAFETY_LOW_PRESSURE  = 1,   // didn't reach min psi after starting
+    PUMP_SAFETY_HIGH_PRESSURE = 2,   // critical psi held past the sustain window
+} pump_safety_reason_t;
+
 // A single snapshot of the pump controller's state. Produced once per second
 // by the feedback sampler, read by the dashboard / MQTT / LED layers.
 typedef struct {
@@ -29,6 +38,17 @@ typedef struct {
     // turned the pump off. Cleared by the next real commanded change, so the
     // cloud can tell a failsafe trip from a normal off.
     bool      failsafe_off;
+    // Pressure safety. safety_lockout latches when a pressure failsafe trips —
+    // the pump refuses to start until reset. safety_reason says which rule.
+    // pressure_warning is a non-latching "pressure has been high too long" flag.
+    bool      safety_lockout;
+    int       safety_reason;       // pump_safety_reason_t
+    bool      pressure_warning;
+    // Active pressure thresholds (psi) — the cloud is the source of truth and
+    // pushes these down; reported back here for confirmation.
+    float     min_psi;
+    float     max_psi;
+    float     critical_psi;
     int       output_gpio;      // control output pin
     int       feedback_gpio;    // sense input pin
     int       pressure_gpio;    // pressure transducer pin
@@ -61,10 +81,33 @@ void      pump_note_failsafe_off(void);
 int       pump_get_threshold_mv(void);
 esp_err_t pump_set_threshold_mv(int mv);
 
+// ---- Pressure safety --------------------------------------------------------
+// Pressure failsafe thresholds (psi) — persisted in NVS; the cloud pushes them
+// down. set returns ESP_ERR_INVALID_ARG unless 0 <= min < max < critical <= 100.
+void      pump_get_pressure_limits(float *min_psi, float *max_psi, float *critical_psi);
+esp_err_t pump_set_pressure_limits(float min_psi, float max_psi, float critical_psi);
+
+// Latch / clear the safety lockout. Tripping does NOT switch the pump itself —
+// the caller turns it off first; this latches the lockout + reason (persisted)
+// so any later "on" (manual, MQTT, schedule) is refused until reset.
+void      pump_trip_lockout(pump_safety_reason_t reason);
+void      pump_reset_lockout(void);
+bool      pump_is_locked_out(void);
+
+// Set/clear the non-latching high-pressure warning flag (surfaced in state so
+// the cloud can email). Not persisted.
+void      pump_set_pressure_warning(bool on);
+
+// Stable wire string for a safety reason ("none" / "low_pressure" /
+// "high_pressure"), used in the MQTT/WS state JSON.
+const char *pump_safety_reason_str(int reason);
+
 // Parse and apply an MQTT command payload. Recognised forms:
 //   {"pump":"on"} / {"pump":"off"} / {"pump":true} / {"pump":false}
 //   {"toggle":true}
 //   {"threshold_mv":1600}
+//   {"min_psi":5,"max_psi":25,"critical_psi":30}   (all three required)
+//   {"reset_failsafe":true}
 // Safe to call from the MQTT event task.
 void      pump_handle_command(const char *json, int len);
 

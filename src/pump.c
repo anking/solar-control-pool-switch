@@ -17,6 +17,14 @@
 static const char *TAG = "pump";
 
 #define NVS_KEY_THRESHOLD  "fb_thresh_mv" // u16: feedback on/off threshold
+#define NVS_KEY_MIN_PSI    "p_min_dpsi"   // u16: min pressure, deci-psi (psi*10)
+#define NVS_KEY_MAX_PSI    "p_max_dpsi"   // u16: warn pressure, deci-psi
+#define NVS_KEY_CRIT_PSI   "p_crit_dpsi"  // u16: critical pressure, deci-psi
+#define NVS_KEY_LOCKOUT    "p_lockout"    // u16: 0 = clear, else pump_safety_reason_t
+
+// psi <-> deci-psi (u16 NVS storage). 0..100 psi -> 0..1000, fits a u16.
+#define PSI_TO_DPSI(psi)   ((uint16_t)((psi) * 10.0f + 0.5f))
+#define DPSI_TO_PSI(dpsi)  ((float)(dpsi) / 10.0f)
 
 static adc_oneshot_unit_handle_t s_adc = NULL;
 static adc_cali_handle_t          s_cali = NULL;            // feedback channel
@@ -40,6 +48,16 @@ static uint32_t s_sample_count   = 0;
 // Latched when a safety failsafe turned the pump off; cleared by the next real
 // commanded change. Guarded by s_mutex.
 static bool     s_failsafe_off   = false;
+
+// Pressure safety. Thresholds (psi) are the cloud-pushed config; the lockout is
+// latched on a trip and persists across reboot until a manual reset. All guarded
+// by s_mutex.
+static float    s_min_psi        = PUMP_PRESSURE_MIN_PSI_DEFAULT;
+static float    s_max_psi        = PUMP_PRESSURE_MAX_PSI_DEFAULT;
+static float    s_critical_psi   = PUMP_PRESSURE_CRITICAL_PSI_DEFAULT;
+static bool     s_safety_lockout = false;
+static int      s_safety_reason  = PUMP_SAFETY_OK;
+static bool     s_pressure_warning = false;
 
 static inline void drive_output(bool on)
 {
@@ -166,6 +184,12 @@ static void sampler_task(void *arg)
             s_reading.pressure_mv    = avg_pmv;
             s_reading.pressure_psi   = p_valid ? pressure_mv_to_psi(avg_pmv) : 0.0f;
             s_reading.failsafe_off   = s_failsafe_off;
+            s_reading.safety_lockout = s_safety_lockout;
+            s_reading.safety_reason  = s_safety_reason;
+            s_reading.pressure_warning = s_pressure_warning;
+            s_reading.min_psi        = s_min_psi;
+            s_reading.max_psi        = s_max_psi;
+            s_reading.critical_psi   = s_critical_psi;
             s_reading.output_gpio    = PUMP_OUTPUT_GPIO;
             s_reading.feedback_gpio  = PUMP_FEEDBACK_GPIO;
             s_reading.pressure_gpio  = PRESSURE_GPIO;
@@ -190,6 +214,24 @@ esp_err_t pump_init(void)
         s_threshold_mv = (int)stored;
         ESP_LOGI(TAG, "Loaded feedback threshold: %d mV", s_threshold_mv);
     }
+
+    // Restore the pressure thresholds (cloud-pushed config). Missing keys keep
+    // the compiled defaults; the cloud re-pushes on connect regardless.
+    uint16_t dpsi;
+    if (nvs_store_get_u16(NVS_NS_PUMP, NVS_KEY_MIN_PSI,  &dpsi) == ESP_OK) s_min_psi      = DPSI_TO_PSI(dpsi);
+    if (nvs_store_get_u16(NVS_NS_PUMP, NVS_KEY_MAX_PSI,  &dpsi) == ESP_OK) s_max_psi      = DPSI_TO_PSI(dpsi);
+    if (nvs_store_get_u16(NVS_NS_PUMP, NVS_KEY_CRIT_PSI, &dpsi) == ESP_OK) s_critical_psi = DPSI_TO_PSI(dpsi);
+
+    // Restore a latched safety lockout — a tripped failsafe stays tripped across
+    // a reboot until a manual reset (the pump still boots OFF either way).
+    uint16_t lock;
+    if (nvs_store_get_u16(NVS_NS_PUMP, NVS_KEY_LOCKOUT, &lock) == ESP_OK && lock != 0) {
+        s_safety_lockout = true;
+        s_safety_reason  = (int)lock;
+        ESP_LOGW(TAG, "Restored safety lockout (reason %d) — pump will not start until reset", s_safety_reason);
+    }
+    ESP_LOGI(TAG, "Pressure limits: min=%.1f warn=%.1f critical=%.1f psi",
+             s_min_psi, s_max_psi, s_critical_psi);
 
     // Control output — configure the level BEFORE switching the pin to output,
     // so we don't glitch the relay during the brief default-low window.
@@ -286,6 +328,14 @@ void pump_get(pump_reading_t *out)
 // the max-runtime failsafe clock. Returns whether the state actually changed.
 static bool apply_state_locked(bool on)
 {
+    // Safety lockout: refuse to energise the pump. Turning OFF is always
+    // allowed (and is a no-op if already off). This is the authoritative guard
+    // — it blocks every "on" path: manual, MQTT command, and cloud schedule.
+    if (on && s_safety_lockout) {
+        ESP_LOGW(TAG, "Refusing pump ON — safety lockout active (reason %d)", s_safety_reason);
+        return false;
+    }
+
     bool changed = (on != s_commanded_on);
     s_commanded_on = on;
     drive_output(on);
@@ -416,6 +466,118 @@ void pump_note_failsafe_off(void)
     xSemaphoreGive(s_mutex);
 }
 
+// ---- Pressure safety --------------------------------------------------------
+
+void pump_get_pressure_limits(float *min_psi, float *max_psi, float *critical_psi)
+{
+    if (!s_mutex) return;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (min_psi)      *min_psi      = s_min_psi;
+    if (max_psi)      *max_psi      = s_max_psi;
+    if (critical_psi) *critical_psi = s_critical_psi;
+    xSemaphoreGive(s_mutex);
+}
+
+esp_err_t pump_set_pressure_limits(float min_psi, float max_psi, float critical_psi)
+{
+    // Must be ordered and in range — a degenerate set could disable a check or
+    // (worse) trip constantly.
+    if (!(min_psi >= PUMP_PRESSURE_PSI_FLOOR &&
+          min_psi < max_psi && max_psi < critical_psi &&
+          critical_psi <= PUMP_PRESSURE_PSI_CEIL)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_mutex) return ESP_FAIL;
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    // Unchanged? Skip — the cloud re-pushes these on every reconnect, so a
+    // network flap must not churn the flash. Compare on the stored deci-psi
+    // resolution so sub-0.1 psi float noise doesn't count as a change.
+    bool unchanged = PSI_TO_DPSI(s_min_psi)      == PSI_TO_DPSI(min_psi) &&
+                     PSI_TO_DPSI(s_max_psi)      == PSI_TO_DPSI(max_psi) &&
+                     PSI_TO_DPSI(s_critical_psi) == PSI_TO_DPSI(critical_psi);
+    s_min_psi      = min_psi;
+    s_max_psi      = max_psi;
+    s_critical_psi = critical_psi;
+    xSemaphoreGive(s_mutex);
+
+    if (unchanged) return ESP_OK;
+
+    // Persisted inline: pressure-limit changes are rare config pushes, so the
+    // brief flash write is acceptable (unlike the per-command feedback threshold).
+    nvs_store_set_u16(NVS_NS_PUMP, NVS_KEY_MIN_PSI,  PSI_TO_DPSI(min_psi));
+    nvs_store_set_u16(NVS_NS_PUMP, NVS_KEY_MAX_PSI,  PSI_TO_DPSI(max_psi));
+    nvs_store_set_u16(NVS_NS_PUMP, NVS_KEY_CRIT_PSI, PSI_TO_DPSI(critical_psi));
+    ESP_LOGI(TAG, "Pressure limits set: min=%.1f warn=%.1f critical=%.1f psi",
+             min_psi, max_psi, critical_psi);
+    return ESP_OK;
+}
+
+void pump_trip_lockout(pump_safety_reason_t reason)
+{
+    if (!s_mutex || reason == PUMP_SAFETY_OK) return;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    bool was = s_safety_lockout;
+    s_safety_lockout       = true;
+    s_safety_reason        = reason;
+    s_reading.safety_lockout = true;
+    s_reading.safety_reason  = reason;
+    xSemaphoreGive(s_mutex);
+
+    if (!was) {
+        // Persist so the lockout survives a reboot (a tripped safety stays
+        // tripped). Only write on the rising edge to spare the flash.
+        nvs_store_set_u16(NVS_NS_PUMP, NVS_KEY_LOCKOUT, (uint16_t)reason);
+        ESP_LOGW(TAG, "SAFETY LOCKOUT (reason %d) — pump will not start until reset", reason);
+    }
+}
+
+void pump_reset_lockout(void)
+{
+    if (!s_mutex) return;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    bool was = s_safety_lockout;
+    s_safety_lockout         = false;
+    s_safety_reason          = PUMP_SAFETY_OK;
+    s_pressure_warning       = false;
+    s_reading.safety_lockout = false;
+    s_reading.safety_reason  = PUMP_SAFETY_OK;
+    s_reading.pressure_warning = false;
+    xSemaphoreGive(s_mutex);
+
+    if (was) {
+        nvs_store_set_u16(NVS_NS_PUMP, NVS_KEY_LOCKOUT, 0);
+        ESP_LOGI(TAG, "Safety lockout reset");
+    }
+}
+
+bool pump_is_locked_out(void)
+{
+    if (!s_mutex) return false;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    bool locked = s_safety_lockout;
+    xSemaphoreGive(s_mutex);
+    return locked;
+}
+
+void pump_set_pressure_warning(bool on)
+{
+    if (!s_mutex) return;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_pressure_warning       = on;
+    s_reading.pressure_warning = on;
+    xSemaphoreGive(s_mutex);
+}
+
+const char *pump_safety_reason_str(int reason)
+{
+    switch (reason) {
+        case PUMP_SAFETY_LOW_PRESSURE:  return "low_pressure";
+        case PUMP_SAFETY_HIGH_PRESSURE: return "high_pressure";
+        default:                        return "none";
+    }
+}
+
 // Parse the value token immediately after `colon` (skipping spaces and an
 // optional opening quote). Returns 1 for on/true/1, 0 for off/false/0, -1 if
 // unrecognised — so a stray "on"/"1" elsewhere in the payload can't flip it.
@@ -465,6 +627,31 @@ void pump_handle_command(const char *json, int len)
         if (colon) {
             long v = strtol(colon + 1, NULL, 10);
             if (v >= 100 && v <= 3300) pump_set_threshold_mv((int)v);
+        }
+    }
+
+    // {"reset_failsafe":true} — clear a tripped safety lockout.
+    const char *rf = strstr(buf, "\"reset_failsafe\"");
+    if (rf) {
+        const char *colon = strchr(rf, ':');
+        if (colon && parse_bool_token(colon) == 1) pump_reset_lockout();
+    }
+
+    // {"min_psi":5,"max_psi":25,"critical_psi":30} — cloud-pushed pressure
+    // limits. All three are required; a partial set is ignored (so we never
+    // apply a half-updated, mis-ordered config).
+    const char *mn = strstr(buf, "\"min_psi\"");
+    const char *mx = strstr(buf, "\"max_psi\"");
+    const char *cr = strstr(buf, "\"critical_psi\"");
+    if (mn && mx && cr) {
+        const char *cmn = strchr(mn, ':');
+        const char *cmx = strchr(mx, ':');
+        const char *ccr = strchr(cr, ':');
+        if (cmn && cmx && ccr) {
+            float fmin = strtof(cmn + 1, NULL);
+            float fmax = strtof(cmx + 1, NULL);
+            float fcrit = strtof(ccr + 1, NULL);
+            pump_set_pressure_limits(fmin, fmax, fcrit);  // validates ordering/range
         }
     }
 }
