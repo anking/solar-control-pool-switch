@@ -177,12 +177,17 @@ latches a lockout locally, so protection works even with the cloud unreachable.
 Evaluated once a second while the pump is running (thresholds are psi; the cloud
 is the source of truth and pushes them down, defaulting to 5 / 25 / 30):
 
-1. **Low pressure** — if the pump doesn't reach `min_psi` within **15 s** of
-   starting, it's almost certainly lost prime / running dry. The firmware
+1. **Low pressure** — if the pump doesn't reach `min_psi` within the **prime
+   grace window** of starting (`prime_grace_s`, cloud-configurable 5–60 s,
+   default 15), it's almost certainly lost prime / running dry. The firmware
    switches the pump **OFF** and latches a lockout.
-2. **High pressure** — if pressure holds at or above `critical_psi` for more than
+2. **Mid-run pressure loss** — once primed, if pressure falls back below
+   `min_psi` and stays there for **5 s** (a ruptured filter casing, burst pipe,
+   or lost suction), it switches **OFF** and latches a lockout. Can be disabled
+   from the cloud (`pressure_loss_en`, default on).
+3. **High pressure** — if pressure holds at or above `critical_psi` for more than
    **3 s** (a blockage or closed valve), it switches **OFF** and latches a lockout.
-3. **High-pressure warning** — if pressure stays above `max_psi` for over **1 min**
+4. **High-pressure warning** — if pressure stays above `max_psi` for over **1 min**
    the firmware raises `pressure_warning` (no lockout); the cloud emails so you
    can backwash a loading filter.
 

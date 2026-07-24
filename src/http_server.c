@@ -143,6 +143,7 @@ static int build_status_json(char *buf, size_t size)
         "\"failsafe_off\":%s,"
         "\"safety_lockout\":%s,\"safety_reason\":\"%s\",\"pressure_warning\":%s,"
         "\"min_psi\":%.1f,\"max_psi\":%.1f,\"critical_psi\":%.1f,"
+        "\"prime_grace_s\":%d,\"pressure_loss_en\":%s,"
         "\"output_gpio\":%d,\"feedback_gpio\":%d,"
         "\"on_seconds\":%lu,\"samples\":%lu}",
         r.valid ? "true" : "false",
@@ -158,6 +159,7 @@ static int build_status_json(char *buf, size_t size)
         pump_safety_reason_str(r.safety_reason),
         r.pressure_warning ? "true" : "false",
         r.min_psi, r.max_psi, r.critical_psi,
+        r.prime_grace_s, r.pressure_loss_enabled ? "true" : "false",
         r.output_gpio, r.feedback_gpio,
         (unsigned long)r.on_seconds,
         (unsigned long)r.sample_count);

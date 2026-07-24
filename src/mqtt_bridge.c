@@ -222,14 +222,16 @@ void mqtt_bridge_publish_info(void)
         snprintf(ui_url, sizeof(ui_url), "http://%s/", wifi.ap_ip);
     }
 
-    char buf[480];
+    char buf[520];
     int len = snprintf(buf, sizeof(buf),
         "{\"model\":\"esp32-c3-pool-switch\",\"firmware\":\"%s\","
         "\"output_gpio\":%d,\"feedback_gpio\":%d,\"pressure_gpio\":%d,\"threshold_mv\":%d,"
         "\"min_psi\":%.1f,\"max_psi\":%.1f,\"critical_psi\":%.1f,"
+        "\"prime_grace_s\":%d,\"pressure_loss_en\":%s,"
         "\"ui_url\":\"%s\",\"ui_host\":\"%s.local\"}",
         fw, PUMP_OUTPUT_GPIO, PUMP_FEEDBACK_GPIO, PRESSURE_GPIO, pump_get_threshold_mv(),
         r.min_psi, r.max_psi, r.critical_psi,
+        r.prime_grace_s, r.pressure_loss_enabled ? "true" : "false",
         ui_url, wifi.hostname);
 
     int msg_id = esp_mqtt_client_publish(s_client, topic, buf, len, 1, 1);
@@ -247,7 +249,7 @@ void mqtt_bridge_publish_state(const pump_reading_t *r)
     char topic[64];
     snprintf(topic, sizeof(topic), "pumps/%s/state", s_mac_str);
 
-    char buf[480];
+    char buf[560];
     int len = snprintf(buf, sizeof(buf),
         "{\"commanded_on\":%s,\"feedback_on\":%s,\"mismatch\":%s,"
         "\"feedback_v\":%.3f,\"feedback_mv\":%d,\"saturated\":%s,"
@@ -255,6 +257,7 @@ void mqtt_bridge_publish_state(const pump_reading_t *r)
         "\"pressure_valid\":%s,\"failsafe_off\":%s,"
         "\"safety_lockout\":%s,\"safety_reason\":\"%s\",\"pressure_warning\":%s,"
         "\"min_psi\":%.1f,\"max_psi\":%.1f,\"critical_psi\":%.1f,"
+        "\"prime_grace_s\":%d,\"pressure_loss_en\":%s,"
         "\"on_seconds\":%lu}",
         r->commanded_on ? "true" : "false",
         r->feedback_on  ? "true" : "false",
@@ -269,6 +272,7 @@ void mqtt_bridge_publish_state(const pump_reading_t *r)
         pump_safety_reason_str(r->safety_reason),
         r->pressure_warning ? "true" : "false",
         r->min_psi, r->max_psi, r->critical_psi,
+        r->prime_grace_s, r->pressure_loss_enabled ? "true" : "false",
         (unsigned long)r->on_seconds);
 
     // Retained QoS 1: the latest state is always available to a new subscriber.

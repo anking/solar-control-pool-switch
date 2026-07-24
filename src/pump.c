@@ -21,6 +21,8 @@ static const char *TAG = "pump";
 #define NVS_KEY_MAX_PSI    "p_max_dpsi"   // u16: warn pressure, deci-psi
 #define NVS_KEY_CRIT_PSI   "p_crit_dpsi"  // u16: critical pressure, deci-psi
 #define NVS_KEY_LOCKOUT    "p_lockout"    // u16: 0 = clear, else pump_safety_reason_t
+#define NVS_KEY_PRIME_S    "p_prime_s"    // u16: prime grace window, seconds
+#define NVS_KEY_LOSS_EN    "p_loss_en"    // u16: mid-run pressure-loss rule (0/1)
 
 // psi <-> deci-psi (u16 NVS storage). 0..100 psi -> 0..1000, fits a u16.
 #define PSI_TO_DPSI(psi)   ((uint16_t)((psi) * 10.0f + 0.5f))
@@ -55,6 +57,8 @@ static bool     s_failsafe_off   = false;
 static float    s_min_psi        = PUMP_PRESSURE_MIN_PSI_DEFAULT;
 static float    s_max_psi        = PUMP_PRESSURE_MAX_PSI_DEFAULT;
 static float    s_critical_psi   = PUMP_PRESSURE_CRITICAL_PSI_DEFAULT;
+static int      s_prime_grace_s  = PUMP_PRIME_GRACE_S_DEFAULT;
+static bool     s_pressure_loss_en = true;
 static bool     s_safety_lockout = false;
 static int      s_safety_reason  = PUMP_SAFETY_OK;
 static bool     s_pressure_warning = false;
@@ -190,6 +194,8 @@ static void sampler_task(void *arg)
             s_reading.min_psi        = s_min_psi;
             s_reading.max_psi        = s_max_psi;
             s_reading.critical_psi   = s_critical_psi;
+            s_reading.prime_grace_s  = s_prime_grace_s;
+            s_reading.pressure_loss_enabled = s_pressure_loss_en;
             s_reading.output_gpio    = PUMP_OUTPUT_GPIO;
             s_reading.feedback_gpio  = PUMP_FEEDBACK_GPIO;
             s_reading.pressure_gpio  = PRESSURE_GPIO;
@@ -222,6 +228,17 @@ esp_err_t pump_init(void)
     if (nvs_store_get_u16(NVS_NS_PUMP, NVS_KEY_MAX_PSI,  &dpsi) == ESP_OK) s_max_psi      = DPSI_TO_PSI(dpsi);
     if (nvs_store_get_u16(NVS_NS_PUMP, NVS_KEY_CRIT_PSI, &dpsi) == ESP_OK) s_critical_psi = DPSI_TO_PSI(dpsi);
 
+    // Prime grace window + mid-run pressure-loss switch (cloud-pushed config).
+    // Out-of-range stored values (e.g. from a downgrade) fall back to defaults.
+    uint16_t u16;
+    if (nvs_store_get_u16(NVS_NS_PUMP, NVS_KEY_PRIME_S, &u16) == ESP_OK &&
+        u16 >= PUMP_PRIME_GRACE_S_MIN && u16 <= PUMP_PRIME_GRACE_S_MAX) {
+        s_prime_grace_s = (int)u16;
+    }
+    if (nvs_store_get_u16(NVS_NS_PUMP, NVS_KEY_LOSS_EN, &u16) == ESP_OK) {
+        s_pressure_loss_en = (u16 != 0);
+    }
+
     // Restore a latched safety lockout — a tripped failsafe stays tripped across
     // a reboot until a manual reset (the pump still boots OFF either way).
     uint16_t lock;
@@ -230,8 +247,9 @@ esp_err_t pump_init(void)
         s_safety_reason  = (int)lock;
         ESP_LOGW(TAG, "Restored safety lockout (reason %d) — pump will not start until reset", s_safety_reason);
     }
-    ESP_LOGI(TAG, "Pressure limits: min=%.1f warn=%.1f critical=%.1f psi",
-             s_min_psi, s_max_psi, s_critical_psi);
+    ESP_LOGI(TAG, "Pressure limits: min=%.1f warn=%.1f critical=%.1f psi, prime=%ds, loss-rule=%s",
+             s_min_psi, s_max_psi, s_critical_psi, s_prime_grace_s,
+             s_pressure_loss_en ? "on" : "off");
 
     // Control output — configure the level BEFORE switching the pin to output,
     // so we don't glitch the relay during the brief default-low window.
@@ -513,6 +531,59 @@ esp_err_t pump_set_pressure_limits(float min_psi, float max_psi, float critical_
     return ESP_OK;
 }
 
+int pump_get_prime_grace_s(void)
+{
+    if (!s_mutex) return s_prime_grace_s;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    int v = s_prime_grace_s;
+    xSemaphoreGive(s_mutex);
+    return v;
+}
+
+esp_err_t pump_set_prime_grace_s(int seconds)
+{
+    if (seconds < PUMP_PRIME_GRACE_S_MIN || seconds > PUMP_PRIME_GRACE_S_MAX)
+        return ESP_ERR_INVALID_ARG;
+    if (!s_mutex) return ESP_FAIL;
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    bool unchanged = (s_prime_grace_s == seconds);
+    s_prime_grace_s = seconds;
+    xSemaphoreGive(s_mutex);
+
+    // Skip the flash write on a no-op re-push (cloud re-sends on reconnect).
+    if (unchanged) return ESP_OK;
+
+    nvs_store_set_u16(NVS_NS_PUMP, NVS_KEY_PRIME_S, (uint16_t)seconds);
+    ESP_LOGI(TAG, "Prime grace window set: %ds", seconds);
+    return ESP_OK;
+}
+
+bool pump_get_pressure_loss_enabled(void)
+{
+    if (!s_mutex) return s_pressure_loss_en;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    bool v = s_pressure_loss_en;
+    xSemaphoreGive(s_mutex);
+    return v;
+}
+
+esp_err_t pump_set_pressure_loss_enabled(bool enabled)
+{
+    if (!s_mutex) return ESP_FAIL;
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    bool unchanged = (s_pressure_loss_en == enabled);
+    s_pressure_loss_en = enabled;
+    xSemaphoreGive(s_mutex);
+
+    if (unchanged) return ESP_OK;
+
+    nvs_store_set_u16(NVS_NS_PUMP, NVS_KEY_LOSS_EN, enabled ? 1 : 0);
+    ESP_LOGI(TAG, "Mid-run pressure-loss rule %s", enabled ? "enabled" : "disabled");
+    return ESP_OK;
+}
+
 void pump_trip_lockout(pump_safety_reason_t reason)
 {
     if (!s_mutex || reason == PUMP_SAFETY_OK) return;
@@ -574,6 +645,7 @@ const char *pump_safety_reason_str(int reason)
     switch (reason) {
         case PUMP_SAFETY_LOW_PRESSURE:  return "low_pressure";
         case PUMP_SAFETY_HIGH_PRESSURE: return "high_pressure";
+        case PUMP_SAFETY_PRESSURE_LOSS: return "pressure_loss";
         default:                        return "none";
     }
 }
@@ -652,6 +724,26 @@ void pump_handle_command(const char *json, int len)
             float fmax = strtof(cmx + 1, NULL);
             float fcrit = strtof(ccr + 1, NULL);
             pump_set_pressure_limits(fmin, fmax, fcrit);  // validates ordering/range
+        }
+    }
+
+    // {"prime_grace_s":15} — cloud-pushed prime grace window (seconds).
+    const char *pg = strstr(buf, "\"prime_grace_s\"");
+    if (pg) {
+        const char *colon = strchr(pg, ':');
+        if (colon) {
+            long v = strtol(colon + 1, NULL, 10);
+            pump_set_prime_grace_s((int)v);  // validates range
+        }
+    }
+
+    // {"pressure_loss_en":true} — cloud-pushed mid-run pressure-loss switch.
+    const char *pl = strstr(buf, "\"pressure_loss_en\"");
+    if (pl) {
+        const char *colon = strchr(pl, ':');
+        if (colon) {
+            int b = parse_bool_token(colon);
+            if (b >= 0) pump_set_pressure_loss_enabled(b == 1);
         }
     }
 }

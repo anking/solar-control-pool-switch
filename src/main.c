@@ -101,6 +101,7 @@ static void status_broadcaster_task(void *arg)
     bool    fs_reached_min   = false;
     int64_t fs_high_since_ms = 0;
     int64_t fs_warn_since_ms = 0;
+    int64_t fs_loss_since_ms = 0;
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -159,20 +160,39 @@ static void status_broadcaster_task(void *arg)
                 fs_reached_min = false;
                 fs_high_since_ms = 0;
                 fs_warn_since_ms = 0;
+                fs_loss_since_ms = 0;
             }
             int64_t on_ms = (esp_timer_get_time() - r.last_change_us) / 1000;
 
-            // LOW: must clear min psi within the grace window of starting.
+            // LOW: must clear min psi within the prime grace window of starting
+            // (cloud-configurable, r.prime_grace_s).
             if (!fs_reached_min) {
                 if (r.pressure_psi >= r.min_psi) {
                     fs_reached_min = true;
-                } else if (on_ms >= (int64_t)PUMP_LOW_PRESSURE_GRACE_S * 1000) {
+                } else if (on_ms >= (int64_t)r.prime_grace_s * 1000) {
                     ESP_LOGW(TAG, "FAILSAFE: low pressure %.1f < %.1f psi %ds after start — LOCKOUT",
-                             r.pressure_psi, r.min_psi, PUMP_LOW_PRESSURE_GRACE_S);
+                             r.pressure_psi, r.min_psi, r.prime_grace_s);
                     pump_set(false);
                     pump_trip_lockout(PUMP_SAFETY_LOW_PRESSURE);
                     pump_get(&r);
                 }
+            }
+
+            // LOSS: primed, then pressure fell back below min psi (ruptured
+            // filter casing, burst pipe, lost suction). Sustained window rides
+            // out transient dips (e.g. a valve actuation).
+            if (!r.safety_lockout && fs_reached_min && r.pressure_loss_enabled &&
+                r.pressure_psi < r.min_psi) {
+                if (fs_loss_since_ms == 0) fs_loss_since_ms = fs_now_ms;
+                else if (fs_now_ms - fs_loss_since_ms >= (int64_t)PUMP_PRESSURE_LOSS_SUSTAIN_S * 1000) {
+                    ESP_LOGW(TAG, "FAILSAFE: pressure lost mid-run %.1f < %.1f psi sustained %ds — LOCKOUT",
+                             r.pressure_psi, r.min_psi, PUMP_PRESSURE_LOSS_SUSTAIN_S);
+                    pump_set(false);
+                    pump_trip_lockout(PUMP_SAFETY_PRESSURE_LOSS);
+                    pump_get(&r);
+                }
+            } else {
+                fs_loss_since_ms = 0;
             }
 
             // HIGH: at/above critical psi held past the sustain window.
@@ -208,6 +228,7 @@ static void status_broadcaster_task(void *arg)
             fs_reached_min = false;
             fs_high_since_ms = 0;
             fs_warn_since_ms = 0;
+            fs_loss_since_ms = 0;
             if (!r.commanded_on && r.pressure_warning) pump_set_pressure_warning(false);
         }
 

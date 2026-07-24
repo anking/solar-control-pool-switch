@@ -12,6 +12,8 @@ typedef enum {
     PUMP_SAFETY_OK = 0,
     PUMP_SAFETY_LOW_PRESSURE  = 1,   // didn't reach min psi after starting
     PUMP_SAFETY_HIGH_PRESSURE = 2,   // critical psi held past the sustain window
+    PUMP_SAFETY_PRESSURE_LOSS = 3,   // primed, then fell back below min psi
+                                     // (ruptured filter casing / burst pipe)
 } pump_safety_reason_t;
 
 // A single snapshot of the pump controller's state. Produced once per second
@@ -49,6 +51,10 @@ typedef struct {
     float     min_psi;
     float     max_psi;
     float     critical_psi;
+    // Active prime grace window (s) and mid-run pressure-loss rule switch —
+    // cloud-pushed alongside the thresholds, reported back for confirmation.
+    int       prime_grace_s;
+    bool      pressure_loss_enabled;
     int       output_gpio;      // control output pin
     int       feedback_gpio;    // sense input pin
     int       pressure_gpio;    // pressure transducer pin
@@ -87,6 +93,17 @@ esp_err_t pump_set_threshold_mv(int mv);
 void      pump_get_pressure_limits(float *min_psi, float *max_psi, float *critical_psi);
 esp_err_t pump_set_pressure_limits(float min_psi, float max_psi, float critical_psi);
 
+// Prime grace window (seconds a starting pump has to reach min psi) — persisted
+// in NVS; the cloud pushes it down. set returns ESP_ERR_INVALID_ARG outside
+// PUMP_PRIME_GRACE_S_MIN..MAX.
+int       pump_get_prime_grace_s(void);
+esp_err_t pump_set_prime_grace_s(int seconds);
+
+// Mid-run pressure-loss rule (primed, then back below min psi → lockout) —
+// enable/disable, persisted in NVS; the cloud pushes it down.
+bool      pump_get_pressure_loss_enabled(void);
+esp_err_t pump_set_pressure_loss_enabled(bool enabled);
+
 // Latch / clear the safety lockout. Tripping does NOT switch the pump itself —
 // the caller turns it off first; this latches the lockout + reason (persisted)
 // so any later "on" (manual, MQTT, schedule) is refused until reset.
@@ -99,7 +116,7 @@ bool      pump_is_locked_out(void);
 void      pump_set_pressure_warning(bool on);
 
 // Stable wire string for a safety reason ("none" / "low_pressure" /
-// "high_pressure"), used in the MQTT/WS state JSON.
+// "high_pressure" / "pressure_loss"), used in the MQTT/WS state JSON.
 const char *pump_safety_reason_str(int reason);
 
 // Parse and apply an MQTT command payload. Recognised forms:
@@ -107,6 +124,8 @@ const char *pump_safety_reason_str(int reason);
 //   {"toggle":true}
 //   {"threshold_mv":1600}
 //   {"min_psi":5,"max_psi":25,"critical_psi":30}   (all three required)
+//   {"prime_grace_s":15}
+//   {"pressure_loss_en":true}
 //   {"reset_failsafe":true}
 // Safe to call from the MQTT event task.
 void      pump_handle_command(const char *json, int len);

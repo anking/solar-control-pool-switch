@@ -132,10 +132,12 @@
 // ---- Pressure failsafes -----------------------------------------------------
 // The device is the authority for pressure safety: it detects, trips, and
 // latches a lockout locally (works fully offline), refusing to restart until a
-// manual reset. The cloud mirrors the reported lockout for email + UI. Three
+// manual reset. The cloud mirrors the reported lockout for email + UI. Four
 // rules, only while the pump is running:
-//   LOW      — doesn't reach min psi within the grace window of starting
+//   LOW      — doesn't reach min psi within the prime grace window of starting
 //              (loss of prime / dry run)            → lockout
+//   LOSS     — primed, then falls back below min psi past the sustain window
+//              (ruptured filter casing / burst pipe) → lockout
 //   HIGH     — at/above critical psi held past the sustain window
 //              (blockage / closed valve)            → lockout
 //   WARNING  — above max psi past the warn window   → warning flag only
@@ -151,10 +153,18 @@
 #define PUMP_PRESSURE_PSI_FLOOR        0.0f
 #define PUMP_PRESSURE_PSI_CEIL         100.0f
 
+// Prime grace window (seconds): how long a starting pump has to reach min psi
+// before the LOW failsafe trips. Cloud-configurable (pushed over MQTT alongside
+// the psi thresholds, persisted in NVS, clamped to MIN..MAX); this is the boot
+// default until the cloud pushes a value.
+#define PUMP_PRIME_GRACE_S_DEFAULT     15
+#define PUMP_PRIME_GRACE_S_MIN         5
+#define PUMP_PRIME_GRACE_S_MAX         60
+
 // Timing windows (seconds). Fixed, not field-configurable.
-#define PUMP_LOW_PRESSURE_GRACE_S      15   // reach min within this of starting
 #define PUMP_HIGH_PRESSURE_SUSTAIN_S   3    // critical held this long → trip
 #define PUMP_PRESSURE_WARN_SUSTAIN_S   60   // above max this long → warn
+#define PUMP_PRESSURE_LOSS_SUSTAIN_S   5    // primed, then below min this long → trip
 
 // =============================================================================
 // REPORTING
